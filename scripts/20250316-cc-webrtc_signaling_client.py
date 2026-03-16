@@ -39,10 +39,10 @@ PUBLIC_IP = "36.110.28.59"
 PIPELINE_DESC = f'''
 webrtcbin name=sendbin turn-server="{TURN_SERVER}"
 v4l2src device=/dev/video4 do-timestamp=true
-! video/x-raw,format=YUY2,width=1280,height=720,framerate=30/1
+! video/x-raw,format=YUY2,width=640,height=480,framerate=30/1
 ! videoconvert
 ! video/x-raw,format=I420
-! nvh264enc preset=5 zerolatency=true bitrate=4000 rc-mode=cbr
+! nvh264enc preset=5 zerolatency=true bitrate=2000 rc-mode=cbr
 ! rtph264pay config-interval=1
 ! application/x-rtp,media=video,encoding-name=H264,payload=96
 ! queue max-size-buffers=0
