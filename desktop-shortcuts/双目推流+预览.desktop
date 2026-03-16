@@ -1,0 +1,11 @@
+[Desktop Entry]
+Encoding=UTF-8
+Version=1.0
+Type=Application
+Name=双目推流+预览
+Name[en_US]=Stereo Stream+Preview
+Icon=camera
+Exec=/home/rhz/Desktop/20250316-cc-启动双目推流和预览.sh
+Terminal=true
+StartupNotify=false
+Comment=双目推流到云端并本地预览

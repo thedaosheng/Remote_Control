@@ -1,0 +1,11 @@
+[Desktop Entry]
+Encoding=UTF-8
+Version=1.0
+Type=Application
+Name=双目相机预览
+Name[en_US]=Stereo Camera Preview
+Icon=camera
+Exec=/home/rhz/Desktop/20250316-cc-预览双目相机.sh
+Terminal=true
+StartupNotify=false
+Comment=预览 RealSense 左右双目相机
