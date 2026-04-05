@@ -1,35 +1,89 @@
-# Remote_Control
+# Remote Control - Teleop WebRTC System
 
-遥操的 AI 代码库
+Apple Vision Pro + Linux + Cloud WebRTC teleoperation system.
 
-## RealSense 双目 WebRTC 远程图传
+Linux side-by-side stereo camera (ZED Mini) streams to Apple Vision Pro via WebRTC through a cloud signaling/TURN server, with real-time head pose feedback.
 
-Linux 端 RealSense 双目相机通过 WebRTC 推流到远程接收端（MacBook）。
+## Architecture
 
-### 快速开始
-
-```bash
-# 启动 WebRTC 推流
-/usr/bin/python3 /home/rhz/teleop/scripts/20250316-cc-webrtc_signaling_client.py
+```
+Linux (Device A)                    Cloud                     Controller (Vision Pro / Browser)
++-----------------+          +------------------+          +-------------------+
+| ZED Mini Camera |          | Signaling Server |          | VP Native App     |
+| GStreamer + NVENC| ------→ | ws://8765        | ------→  | LiveKit WebRTC    |
+| WebRTC Sender   |          | coturn TURN 3478 |          | Metal Renderer    |
++-----------------+          +------------------+          +-------------------+
+                                                           | HTML Receiver     |
+                                     ↑                     | WebXR / Canvas    |
+                                     |                     +-------------------+
+                                     |
+                              Head Pose (30Hz)
+                              quaternion + position
 ```
 
-### 文件说明
+## Directory Structure
 
-- `scripts/20250316-cc-webrtc_signaling_client.py` - WebRTC 发送端（主程序）
-- `scripts/20250316-cc-webrtc_stereo_client.py` - 双目 WebRTC 发送端
-- `scripts/20250316-cc-webrtc_signaling_server.py` - 云端信令服务器
+```
+.
+├── device-a-linux/          # A-side: Linux robot (被控制端)
+│   ├── zedmini_webrtc_sender.py     # GStreamer webrtcbin sender (production)
+│   └── zedmini_aiortc_sender.py     # aiortc sender (alternative)
+│
+├── cloud/                   # Cloud signaling + TURN
+│   ├── signaling_server.py          # WebSocket signaling server v9
+│   └── turnserver.conf              # coturn TURN configuration
+│
+├── controller/              # Controller side (操控端)
+│   ├── html-receiver/               # Browser-based WebXR receiver
+│   │   └── visionpro_stereo_receiver.html
+│   ├── visionos-native/             # Vision Pro native app (Xcode)
+│   │   └── RemoteControl/
+│   └── clash-config/                # Clash Verge TUN bypass config
+│       └── Merge.yaml
+```
 
-### 桌面快捷方式
+## Quick Start
 
-见 `desktop-shortcuts/` 目录：
-- `双目预览.desktop` - 预览双目相机
-- `双目推流+预览.desktop` - 推流同时预览
+### 1. Cloud Server
 
-### 配置
+```bash
+# Start signaling server
+python3 -u signaling_server.py
 
-- 信令服务器: ws://39.102.113.104:8765
-- TURN 服务器: turn://remote:Wawjxyz3%21@39.102.113.104:3478
-- 左相机: /dev/video4
-- 右相机: /dev/video10
+# coturn should be running as systemd service
+systemctl status coturn
+```
 
-**详细日报**: 见 `desktop-shortcuts/20250316-日报-WebRTC公网图传.md`
+Server: `39.102.113.104`, WS port: `8765`, TURN port: `3478`
+
+### 2. Linux Sender (Device A)
+
+```bash
+# Must use system Python (not conda)
+/usr/bin/python3 -u zedmini_webrtc_sender.py
+```
+
+Requires: ZED Mini camera, NVIDIA GPU (nvh264enc), GStreamer 1.20+
+
+### 3. Controller
+
+**Option A: Browser (Mac/Windows)**
+- Serve `visionpro_stereo_receiver.html` via HTTPS
+- Open in Vision Pro Safari or desktop browser
+
+**Option B: Vision Pro Native App**
+- Open `RemoteControl.xcodeproj` in Xcode
+- Build & run on Vision Pro device
+
+### Clash Verge TUN Bypass
+
+If using Clash Verge with TUN mode, the `Merge.yaml` config ensures WebRTC UDP traffic bypasses the virtual NIC. Without this, TURN allocation and DTLS handshake will fail.
+
+## Key Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| Video | 1344x376 SBS, 60fps, H.264 8Mbps |
+| Signaling | `ws://39.102.113.104:8765` |
+| TURN | `39.102.113.104:3478` (user: `remote`) |
+| Latency | ~50-90ms end-to-end |

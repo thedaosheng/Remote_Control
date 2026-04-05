@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Required: ARKit World Sensing (head pose via WorldTrackingProvider) -->
+	<key>NSWorldSensingUsageDescription</key>
+	<string>Required to track head pose and transmit it to the remote robot.</string>
+
+	<!-- Phase 2: Eye Tracking -->
+	<key>NSEyeTrackingUsageDescription</key>
+	<string>Used for foveated streaming — gaze data is sent to the remote camera system.</string>
+
+	<!-- Allow plain ws:// connection (dev only — no TLS for signaling) -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+
+	<!-- visionOS scene management -->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationPreferredDefaultSceneSessionRole</key>
+		<string>UIWindowSceneSessionRoleApplication</string>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+		<key>UISceneConfigurations</key>
+		<dict/>
+	</dict>
+</dict>
+</plist>
