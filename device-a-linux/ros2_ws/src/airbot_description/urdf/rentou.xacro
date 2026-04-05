@@ -1,0 +1,117 @@
+<?xml version="1.0"?>
+<!--
+  人头云台 xacro 宏定义（2-DOF 偏航+俯仰）
+  STL 顶点坐标已修正：消除了 SolidWorks 装配体偏移，mesh 居中在各 link origin
+
+  运动链：
+    ${parent_link}
+      └── rentou_base_link（底座）
+            └── rentou_joint1（Yaw, Z 轴）→ rentou_link1（转台）
+                  └── rentou_joint2（Pitch, X 轴）→ rentou_link2（俯仰支架）
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="rentou_gimbal" params="parent_link xyz rpy">
+
+    <!-- ===== 底座 ===== -->
+    <link name="rentou_base_link">
+      <inertial>
+        <origin xyz="0.032781 -0.039573 0.024362" rpy="0 0 0"/>
+        <mass value="0.452"/>
+        <inertia ixx="0.003670" ixy="-0.001043" ixz="0.000381"
+                 iyy="0.000997" iyz="-0.000719" izz="0.003963"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/rentou_base_link.STL"
+                scale="0.001 0.001 0.001"/>
+        </geometry>
+        <material name="rentou_gray"><color rgba="0.7 0.7 0.7 1"/></material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/rentou_base_link.STL"
+                scale="0.001 0.001 0.001"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="rentou_fixed_base" type="fixed">
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+      <parent link="${parent_link}"/>
+      <child link="rentou_base_link"/>
+    </joint>
+
+    <!-- ===== 偏航转台 ===== -->
+    <link name="rentou_link1">
+      <inertial>
+        <origin xyz="0.043649 0.000185 -0.000001" rpy="0 0 0"/>
+        <mass value="0.177"/>
+        <inertia ixx="0.000084" ixy="0.0" ixz="0.0"
+                 iyy="0.000109" iyz="0.0" izz="0.000105"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/rentou_link1.STL"
+                scale="0.001 0.001 0.001"/>
+        </geometry>
+        <material name="rentou_green"><color rgba="0.2 0.8 0.2 1"/></material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/rentou_link1.STL"
+                scale="0.001 0.001 0.001"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="rentou_joint1" type="revolute">
+      <origin xyz="0.02350 0.03700 0.00000" rpy="0 0 0"/>
+      <parent link="rentou_base_link"/>
+      <child link="rentou_link1"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="-3.14159" upper="3.14159" effort="10.0" velocity="3.14"/>
+      <dynamics damping="0.1" friction="0.0"/>
+    </joint>
+
+    <!-- ===== 俯仰支架 ===== -->
+    <link name="rentou_link2">
+      <inertial>
+        <origin xyz="-0.007670 -0.004107 -0.054559" rpy="0 0 0"/>
+        <mass value="0.124"/>
+        <inertia ixx="0.000088" ixy="0.000001" ixz="-0.000006"
+                 iyy="0.000142" iyz="0.000018" izz="0.000100"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/rentou_link2.STL"
+                scale="0.001 0.001 0.001"/>
+        </geometry>
+        <material name="rentou_pink"><color rgba="0.9 0.4 0.5 1"/></material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/rentou_link2.STL"
+                scale="0.001 0.001 0.001"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="rentou_joint2" type="revolute">
+      <origin xyz="0.05200 0.02350 0.00001" rpy="0 0 0"/>
+      <parent link="rentou_link1"/>
+      <child link="rentou_link2"/>
+      <axis xyz="1 0 0"/>
+      <limit lower="-1.57080" upper="1.57080" effort="10.0" velocity="3.14"/>
+      <dynamics damping="0.1" friction="0.0"/>
+    </joint>
+
+  </xacro:macro>
+
+</robot>

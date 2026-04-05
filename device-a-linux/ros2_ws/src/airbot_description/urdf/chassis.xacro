@@ -1,0 +1,167 @@
+<?xml version="1.0"?>
+<!--
+  四舵轮全向底盘 xacro（Swerve Drive）
+
+  每个轮组 2 自由度：
+    1. steer_joint (revolute, 绕 Z 轴) — 转向电机，改变轮子朝向
+    2. drive_joint (continuous, 绕轮轴) — 驱动电机，轮子转动
+
+  4 个轮组 = 8 个关节 → 全向移动（平移+旋转+侧移）
+
+  运动链（每个轮组）：
+    chassis_link
+      └── {name}_steer_joint (revolute Z)
+            └── {name}_steer_link (转向模块)
+                  └── {name}_drive_joint (continuous Y)
+                        └── {name}_wheel_link (轮子)
+
+  参数：
+    parent_link, xyz, rpy — 底盘安装位置
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- 底盘尺寸（m）-->
+  <xacro:property name="chassis_length" value="0.42"/>
+  <xacro:property name="chassis_width" value="0.40"/>
+  <xacro:property name="chassis_height" value="0.10"/>
+  <xacro:property name="chassis_mass" value="8.0"/>
+
+  <!-- 轮子参数 -->
+  <xacro:property name="wheel_radius" value="0.084"/>
+  <xacro:property name="wheel_width" value="0.04"/>
+  <xacro:property name="wheel_mass" value="0.8"/>
+
+  <!-- 转向模块参数 -->
+  <xacro:property name="steer_height" value="0.06"/>
+  <xacro:property name="steer_radius" value="0.035"/>
+  <xacro:property name="steer_mass" value="0.5"/>
+
+  <!-- 轮组安装偏移（轮组中心到底盘中心）-->
+  <xacro:property name="wheel_x" value="0.16"/>
+  <xacro:property name="wheel_y" value="0.15"/>
+
+  <!-- ===== 单个舵轮模块宏 ===== -->
+  <xacro:macro name="swerve_module" params="name parent x y">
+
+    <!-- 转向模块（圆柱体，竖直放置）-->
+    <link name="${name}_steer_link">
+      <inertial>
+        <origin xyz="0 0 -0.03" rpy="0 0 0"/>
+        <mass value="${steer_mass}"/>
+        <inertia ixx="0.0005" ixy="0" ixz="0"
+                 iyy="0.0005" iyz="0" izz="0.0003"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 -0.03" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="${steer_radius}" length="${steer_height}"/>
+        </geometry>
+        <material name="${name}_steer_mat">
+          <color rgba="0.4 0.4 0.45 1"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 -0.03" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="${steer_radius}" length="${steer_height}"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <!-- 转向关节：绕 Z 轴旋转（改变轮子朝向）-->
+    <joint name="${name}_steer_joint" type="revolute">
+      <origin xyz="${x} ${y} -${chassis_height/2}" rpy="0 0 0"/>
+      <parent link="${parent}"/>
+      <child link="${name}_steer_link"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="-3.14159" upper="3.14159" effort="20" velocity="6.28"/>
+      <dynamics damping="0.05" friction="0.01"/>
+    </joint>
+
+    <!-- 轮子 -->
+    <link name="${name}_wheel_link">
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="${wheel_mass}"/>
+        <inertia ixx="0.001" ixy="0" ixz="0"
+                 iyy="0.002" iyz="0" izz="0.001"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        </geometry>
+        <material name="${name}_wheel_mat">
+          <color rgba="0.15 0.15 0.15 1"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <!-- 驱动关节：绕 Y 轴旋转（轮子滚动）-->
+    <!-- 轮轴位于转向模块下方，轮子中心在 steer 底部 -->
+    <joint name="${name}_drive_joint" type="continuous">
+      <origin xyz="0 0 -${steer_height}" rpy="0 0 0"/>
+      <parent link="${name}_steer_link"/>
+      <child link="${name}_wheel_link"/>
+      <axis xyz="0 1 0"/>
+      <dynamics damping="0.01" friction="0.005"/>
+    </joint>
+
+  </xacro:macro>
+
+  <!-- ===== 底盘主宏 ===== -->
+  <xacro:macro name="omni_chassis" params="parent_link xyz rpy">
+
+    <!-- 底盘主体 -->
+    <link name="chassis_link">
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="${chassis_mass}"/>
+        <inertia ixx="0.2" ixy="0" ixz="0"
+                 iyy="0.3" iyz="0" izz="0.4"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${chassis_length} ${chassis_width} ${chassis_height}"/>
+        </geometry>
+        <material name="chassis_color">
+          <color rgba="0.15 0.15 0.15 0.9"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${chassis_length} ${chassis_width} ${chassis_height}"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <!-- 底盘固定到父 link -->
+    <joint name="chassis_fixed_base" type="fixed">
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+      <parent link="${parent_link}"/>
+      <child link="chassis_link"/>
+    </joint>
+
+    <!-- ===== 四个舵轮模块 ===== -->
+    <!--
+      俯视图（+X 朝前，+Y 朝左）：
+        FL ●─────────● FR
+           │ chassis │
+        RL ●─────────● RR
+    -->
+    <xacro:swerve_module name="fl" parent="chassis_link" x="${wheel_x}"  y="${wheel_y}"/>
+    <xacro:swerve_module name="fr" parent="chassis_link" x="${wheel_x}"  y="-${wheel_y}"/>
+    <xacro:swerve_module name="rl" parent="chassis_link" x="-${wheel_x}" y="${wheel_y}"/>
+    <xacro:swerve_module name="rr" parent="chassis_link" x="-${wheel_x}" y="-${wheel_y}"/>
+
+  </xacro:macro>
+
+</robot>

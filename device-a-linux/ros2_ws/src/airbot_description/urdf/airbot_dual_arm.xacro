@@ -1,0 +1,257 @@
+<?xml version="1.0"?>
+<!--
+  双臂完整描述 — Airbot Play G2 × 2 + 躯干底盘
+
+  结构树：
+    world
+    └── torso_link（躯干，简单长方体占位）
+        ├── left_base_link ... left_tcp    （左臂 6DOF + G2夹爪 = 7关节）
+        └── right_base_link ... right_tcp  （右臂 6DOF + G2夹爪 = 7关节）
+
+  ros2_control 关节（共14个）：
+    左臂: left_joint1~6 (revolute) + left_joint7 (prismatic, 夹爪)
+    右臂: right_joint1~6 (revolute) + right_joint7 (prismatic, 夹爪)
+
+  参数：
+    hardware_plugin — ros2_control 硬件插件，默认 mock_components/GenericSystem
+-->
+<robot name="airbot_dual_arm" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- 硬件插件参数化：mock / sim / real 切换只需改这个参数 -->
+  <xacro:arg name="hardware_plugin" default="mock_components/GenericSystem"/>
+
+  <xacro:include filename="$(find airbot_description)/urdf/airbot_arm.xacro"/>
+  <xacro:include filename="$(find airbot_description)/urdf/rentou.xacro"/>
+  <xacro:include filename="$(find airbot_description)/urdf/chassis.xacro"/>
+
+  <!-- ===== 世界参考系 ===== -->
+  <link name="world"/>
+
+  <!-- ===== 躯干（两臂公共挂载点）===== -->
+  <link name="torso_link">
+    <inertial>
+      <origin xyz="0 0 0.3" rpy="0 0 0"/>
+      <mass value="20.0"/>
+      <inertia ixx="1.0" ixy="0" ixz="0" iyy="1.0" iyz="0" izz="0.5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.3" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.25 0.18 0.55"/>
+      </geometry>
+      <material name="torso_color">
+        <color rgba="0.25 0.45 0.85 0.85"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.3" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.25 0.18 0.55"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ===== 底盘固定在世界坐标系 ===== -->
+  <xacro:omni_chassis
+    parent_link="world"
+    xyz="0 0 0"
+    rpy="0 0 0"/>
+
+  <!-- ===== 升降机构：底盘 → 躯干 ===== -->
+  <!-- prismatic joint 沿 Z 轴上下移动，行程 0~0.4m -->
+  <joint name="lift_joint" type="prismatic">
+    <origin xyz="0 0 0.16" rpy="0 0 0"/>
+    <parent link="chassis_link"/>
+    <child link="torso_link"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="0.0" upper="0.4" effort="200" velocity="0.1"/>
+  </joint>
+
+  <!-- ===== 左臂 ===== -->
+  <xacro:airbot_arm
+    prefix="left_"
+    parent_link="torso_link"
+    xyz="0 0.20 0.58"
+    rpy="0 0 0"/>
+
+  <!-- ===== 右臂 ===== -->
+  <xacro:airbot_arm
+    prefix="right_"
+    parent_link="torso_link"
+    xyz="0 -0.20 0.58"
+    rpy="0 0 0"/>
+
+  <!-- ===== 人头云台（2-DOF 偏航+俯仰）===== -->
+  <!-- 安装在躯干顶部，z=0.60 约在躯干 box 顶面 -->
+  <xacro:rentou_gimbal
+    parent_link="torso_link"
+    xyz="0 0 0.60"
+    rpy="0 0 0"/>
+
+  <!-- ===== ros2_control 硬件接口 ===== -->
+  <!--
+    每臂 8 个关节：joint1~6 (revolute) + joint7 (夹爪左指) + joint8 (夹爪右指)
+    共 16 个关节，command_interface=position, state_interface=position+velocity
+    joint7/joint8 在控制时保持同步（joint8 = joint7），实现夹爪对称开闭
+    hardware_plugin 由 xacro arg 注入，不同模式对应不同插件
+  -->
+  <ros2_control name="airbot_dual_arm_hw" type="system">
+
+    <hardware>
+      <plugin>$(arg hardware_plugin)</plugin>
+    </hardware>
+
+    <!-- ====== 左臂 6 轴 + 夹爪双指 = 8 关节 ====== -->
+    <joint name="left_joint1">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="left_joint2">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="left_joint3">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="left_joint4">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="left_joint5">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="left_joint6">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <!-- 左臂夹爪左指 = joint7（prismatic 0~0.0366m）-->
+    <joint name="left_joint7">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <!-- 左臂夹爪右指 = joint8（与 joint7 同步，实现对称开闭）-->
+    <joint name="left_joint8">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <!-- ====== 右臂 6 轴 + 夹爪双指 = 8 关节 ====== -->
+    <joint name="right_joint1">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="right_joint2">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="right_joint3">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="right_joint4">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="right_joint5">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="right_joint6">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <!-- 右臂夹爪左指 = joint7 -->
+    <joint name="right_joint7">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <!-- 右臂夹爪右指 = joint8 -->
+    <joint name="right_joint8">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <!-- ====== 升降关节 ====== -->
+    <joint name="lift_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <!-- ====== 云台 2 关节 ====== -->
+    <joint name="rentou_joint1">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="rentou_joint2">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <!-- ====== 底盘 4 舵轮模块 × 2 = 8 关节 ====== -->
+    <!-- 转向关节（revolute, position 控制）-->
+    <joint name="fl_steer_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="fr_steer_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="rl_steer_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="rr_steer_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <!-- 驱动关节（continuous, velocity 控制）-->
+    <joint name="fl_drive_joint">
+      <command_interface name="velocity"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="fr_drive_joint">
+      <command_interface name="velocity"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="rl_drive_joint">
+      <command_interface name="velocity"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="rr_drive_joint">
+      <command_interface name="velocity"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+
+  </ros2_control>
+
+</robot>

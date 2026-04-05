@@ -1,0 +1,392 @@
+<?xml version="1.0"?>
+<!--
+  单臂 xacro 宏定义 — Airbot Play G2（6DOF臂 + G2夹爪）
+  来源参考：DISCOVERSE models/mjcf/manipulator/airbot_play_force/_play_force.urdf
+
+  运动链：
+    ${prefix}base_link
+      → joint1 → ${prefix}link1
+      → joint2 → ${prefix}link2
+      → joint3 → ${prefix}link3
+      → joint4 → ${prefix}link4
+      → joint5 → ${prefix}link5
+      → joint6 → ${prefix}link6
+      → arm_connect_joint → ${prefix}eef_connect_base_link
+      → connect_eef_joint → ${prefix}g2_base_link
+      → g2_left_joint  → ${prefix}g2_left_link
+      → g2_right_joint → ${prefix}g2_right_link
+
+  参数：
+    prefix      — 命名前缀，如 "left_" / "right_"
+    parent_link — 本臂 base_link 的父 link
+    xyz         — 安装位置偏移
+    rpy         — 安装姿态偏移
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="airbot_arm" params="prefix parent_link xyz rpy">
+
+    <!-- ===== base_link ===== -->
+    <link name="${prefix}base_link">
+      <inertial>
+        <origin xyz="-0.018345 -0.002558 0.03724" rpy="0 0 0"/>
+        <mass value="0.6735"/>
+        <inertia ixx="0.00121381" ixy="-3.271E-05" ixz="-0.00023366"
+                 iyy="0.00164872" iyz="-2.757E-05" izz="0.00126552"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/base_link.STL"/>
+        </geometry>
+        <material name="${prefix}mat_gray">
+          <color rgba="0.75294 0.75294 0.75294 1"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/base_link.STL"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <!-- base_link 挂到父 link -->
+    <joint name="${prefix}fixed_base" type="fixed">
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+      <parent link="${parent_link}"/>
+      <child link="${prefix}base_link"/>
+    </joint>
+
+    <!-- ===== link1 ===== -->
+    <link name="${prefix}link1">
+      <inertial>
+        <origin xyz="0.00014396 -0.00098536 -0.020968" rpy="0 0 0"/>
+        <mass value="0.607"/>
+        <inertia ixx="0.0011117" ixy="1.605E-05" ixz="-1.45E-06"
+                 iyy="0.0010136" iyz="-7.07E-06" izz="0.0003867"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/link1.STL"/>
+        </geometry>
+        <material name="${prefix}mat_gray"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/link1.STL"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}joint1" type="revolute">
+      <origin xyz="0 0 0.1127" rpy="0 0 0"/>
+      <parent link="${prefix}base_link"/>
+      <child link="${prefix}link1"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="-3.1416" upper="2.0944" effort="18" velocity="3.14"/>
+    </joint>
+
+    <!-- ===== link2 ===== -->
+    <link name="${prefix}link2">
+      <inertial>
+        <origin xyz="0.13769 0.012537 0.0044739" rpy="0 0 0"/>
+        <mass value="0.918"/>
+        <inertia ixx="0.00094437" ixy="0.00112155" ixz="-0.00063705"
+                 iyy="0.03479442" iyz="-7.45E-06" izz="0.03461144"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/link2.STL"/>
+        </geometry>
+        <material name="${prefix}mat_gray"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/link2.STL"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}joint2" type="revolute">
+      <origin xyz="0 0 0" rpy="-1.5708 -0.3867 3.1416"/>
+      <parent link="${prefix}link1"/>
+      <child link="${prefix}link2"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="-2.9671" upper="0.17453" effort="18" velocity="3.14"/>
+    </joint>
+
+    <!-- ===== link3 ===== -->
+    <link name="${prefix}link3">
+      <inertial>
+        <origin xyz="1.5134E-05 0.10706 0.0082136" rpy="0 0 0"/>
+        <mass value="0.7"/>
+        <inertia ixx="0.01565914" ixy="1.007E-05" ixz="1.02E-06"
+                 iyy="0.00045929" iyz="0.00010253" izz="0.0154811"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/link3.STL"/>
+        </geometry>
+        <material name="${prefix}mat_gray"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/link3.STL"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}joint3" type="revolute">
+      <origin xyz="0.27009 0 0" rpy="0 0 1.9575"/>
+      <parent link="${prefix}link2"/>
+      <child link="${prefix}link3"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="-0.087266" upper="3.1416" effort="18" velocity="3.14"/>
+    </joint>
+
+    <!-- ===== link4 ===== -->
+    <link name="${prefix}link4">
+      <inertial>
+        <origin xyz="-1.6216E-05 0.002995 -0.019407" rpy="0 0 0"/>
+        <mass value="0.359"/>
+        <inertia ixx="0.00051773" ixy="-4E-08" ixz="1.5E-07"
+                 iyy="0.00052925" iyz="-4.05E-06" izz="0.00013681"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/link4.STL"/>
+        </geometry>
+        <material name="${prefix}mat_gray"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/link4.STL"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}joint4" type="revolute">
+      <origin xyz="0 0.29015 0" rpy="-1.5708 -1.5708 0"/>
+      <parent link="${prefix}link3"/>
+      <child link="${prefix}link4"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="-3.0107" upper="3.0107" effort="3" velocity="6.28"/>
+    </joint>
+
+    <!-- ===== link5 ===== -->
+    <link name="${prefix}link5">
+      <inertial>
+        <origin xyz="-4.5037E-05 0.033144 0.0024106" rpy="0 0 0"/>
+        <mass value="0.403"/>
+        <inertia ixx="0.00116016" ixy="-3.1E-07" ixz="-2.4E-07"
+                 iyy="0.00024251" iyz="-4.809E-05" izz="0.00108456"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/link5.STL"/>
+        </geometry>
+        <material name="${prefix}mat_gray"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/link5.STL"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}joint5" type="revolute">
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <parent link="${prefix}link4"/>
+      <child link="${prefix}link5"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="-1.7628" upper="1.7628" effort="3" velocity="6.28"/>
+    </joint>
+
+    <!-- ===== link6 ===== -->
+    <link name="${prefix}link6">
+      <inertial>
+        <origin xyz="-4.6366E-05 4.3424E-05 0.066592" rpy="0 0 0"/>
+        <mass value="0.11"/>
+        <inertia ixx="0.00051056" ixy="0" ixz="-3.4E-07"
+                 iyy="0.00051056" iyz="3.2E-07" izz="1.73E-05"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/link6.STL"/>
+        </geometry>
+        <material name="${prefix}mat_white">
+          <color rgba="1 1 1 1"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/link6.STL"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}joint6" type="revolute">
+      <origin xyz="0 0 0" rpy="-1.5708 0 0"/>
+      <parent link="${prefix}link5"/>
+      <child link="${prefix}link6"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="-3.0107" upper="3.0107" effort="3" velocity="6.28"/>
+    </joint>
+
+    <!-- ===== eef_connect_base_link（臂与夹爪连接件）===== -->
+    <link name="${prefix}eef_connect_base_link">
+      <inertial>
+        <origin xyz="3.5687E-06 0.00020484 -0.004811" rpy="0 0 0"/>
+        <mass value="0.019009"/>
+        <inertia ixx="4.0476E-06" ixy="-9.5794E-10" ixz="1.8201E-10"
+                 iyy="3.9455E-06" iyz="7.997E-09" izz="7.498E-06"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/eef_connect_base_link.STL"/>
+        </geometry>
+        <material name="${prefix}mat_light_gray">
+          <color rgba="0.89804 0.91765 0.92941 1"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/eef_connect_base_link.STL"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}arm_connect_joint" type="fixed">
+      <origin xyz="0.0 0.0 0.0955" rpy="0.0 0.0 0.0"/>
+      <parent link="${prefix}link6"/>
+      <child link="${prefix}eef_connect_base_link"/>
+    </joint>
+
+    <!-- ===== G2夹爪：g2_base_link ===== -->
+    <link name="${prefix}g2_base_link">
+      <inertial>
+        <origin xyz="5.9308E-05 -3.262E-05 0.041814" rpy="0 0 0"/>
+        <mass value="0.488"/>
+        <inertia ixx="0.00115523" ixy="-2E-06" ixz="2.2E-07"
+                 iyy="0.00137334" iyz="-8.7E-07" izz="0.00042051"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/g2_base_link.STL"/>
+        </geometry>
+        <material name="${prefix}mat_gray"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/g2_base_link.STL"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}connect_eef_joint" type="fixed">
+      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
+      <parent link="${prefix}eef_connect_base_link"/>
+      <child link="${prefix}g2_base_link"/>
+    </joint>
+
+    <!-- ===== G2夹爪：左指 ===== -->
+    <link name="${prefix}g2_left_link">
+      <inertial>
+        <origin xyz="0.018307 5.9636E-06 0.012505" rpy="0 0 0"/>
+        <mass value="0.054004"/>
+        <inertia ixx="2.46E-05" ixy="0" ixz="7.55E-06"
+                 iyy="4.78E-05" iyz="0" izz="4.892E-05"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/g2_left_link.STL"/>
+        </geometry>
+        <material name="${prefix}mat_gray"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/g2_left_link.STL"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <!-- joint7 = 夹爪左指（prismatic，用于 ros2_control）-->
+    <joint name="${prefix}joint7" type="prismatic">
+      <origin xyz="0 0 0.0705" rpy="0 -1.5708 0"/>
+      <parent link="${prefix}g2_base_link"/>
+      <child link="${prefix}g2_left_link"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="0" upper="0.0366" effort="5" velocity="0.1"/>
+    </joint>
+
+    <!-- ===== G2夹爪：右指 ===== -->
+    <link name="${prefix}g2_right_link">
+      <inertial>
+        <origin xyz="0.018307 -6.8572E-07 0.012505" rpy="0 0 0"/>
+        <mass value="0.054004"/>
+        <inertia ixx="2.46E-05" ixy="0" ixz="-7.55E-06"
+                 iyy="4.78E-05" iyz="0" izz="4.892E-05"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/g2_right_link.STL"/>
+        </geometry>
+        <material name="${prefix}mat_gray"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://airbot_description/meshes/g2_right_link.STL"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <!-- joint8 = 夹爪右指（prismatic，与 joint7 左指对称，由 ros2_control 同步驱动）-->
+    <!-- 原始 URDF 用 mimic 跟随左指，但 ROS2 robot_state_publisher 不支持 mimic -->
+    <!-- 所以改为独立关节，由控制器保持 joint8 = joint7 来实现同步开闭 -->
+    <joint name="${prefix}joint8" type="prismatic">
+      <origin xyz="0 0 0.0705" rpy="3.1416 -1.5708 0"/>
+      <parent link="${prefix}g2_base_link"/>
+      <child link="${prefix}g2_right_link"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="0" upper="0.0366" effort="5" velocity="0.1"/>
+    </joint>
+
+    <!-- ===== TCP：工具中心点虚拟 link（MoveIt2 末端执行器用）===== -->
+    <link name="${prefix}tcp">
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="1E-15"/>
+        <inertia ixx="1E-11" ixy="0" ixz="0" iyy="1E-11" iyz="0" izz="1E-11"/>
+      </inertial>
+    </link>
+
+    <joint name="${prefix}joint_tcp" type="fixed">
+      <origin xyz="0 0 0.12" rpy="0 0 0"/>
+      <parent link="${prefix}g2_base_link"/>
+      <child link="${prefix}tcp"/>
+    </joint>
+
+  </xacro:macro>
+
+</robot>
