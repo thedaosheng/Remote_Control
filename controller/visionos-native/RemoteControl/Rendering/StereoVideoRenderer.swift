@@ -18,21 +18,24 @@ struct VideoLayerConfiguration: CompositorLayerConfiguration {
         capabilities: LayerRenderer.Capabilities,
         configuration: inout LayerRenderer.Configuration
     ) {
-        // 颜色 / 深度 像素格式 —— visionOS Compositor 推荐配置
-        configuration.depthFormat = .depth32Float
-        configuration.colorFormat = .bgra8Unorm_srgb
-
-        // 查询设备支持的 layout，前提：开启 foveation
-        // visionOS 26 + Vision Pro 上 layered 是最高效的布局
-        let opts: LayerRenderer.Capabilities.SupportedLayoutsOptions = [.foveationEnabled]
-        let supported = capabilities.supportedLayouts(options: opts)
-
-        // 必须使用 layered（2DArray）—— vertex amplification 单 pass 渲染的前提
-        // 单个 colorTexture[0] 是 type2DArray，arrayLength = 2（左右眼分别为 slice 0/1）
-        configuration.layout = supported.contains(.layered) ? .layered : .shared
+        // ★ 关键: 不要显式覆盖 colorFormat 和 depthFormat!
+        //    Apple 官方 Compositor Services 模板完全不设置这两个,
+        //    让 visionOS 根据设备的显示管线选最佳格式(visionOS 26 上通常是 HDR 浮点)。
+        //    之前强制设成 bgra8Unorm_srgb 可能导致 compositor 无法正确呈现 → 黑屏。
 
         // 必须开启 foveation —— Apple 模板里 layered 渲染依赖 rasterizationRateMap
-        configuration.isFoveationEnabled = capabilities.supportsFoveation
+        let foveationEnabled = capabilities.supportsFoveation
+        configuration.isFoveationEnabled = foveationEnabled
+
+        // 查询设备支持的 layout,前提:开启 foveation
+        // visionOS 26 + Vision Pro 上 layered 是最高效的布局
+        let opts: LayerRenderer.Capabilities.SupportedLayoutsOptions =
+            foveationEnabled ? [.foveationEnabled] : []
+        let supported = capabilities.supportedLayouts(options: opts)
+
+        // 优先使用 layered(单 pass + vertex amplification),退回 dedicated(两 pass)
+        // 注意: Apple 模板用 .dedicated 作为 fallback,而不是 .shared。
+        configuration.layout = supported.contains(.layered) ? .layered : .dedicated
     }
 }
 
@@ -81,6 +84,48 @@ private struct EyePairUniforms {
     var pad0: UInt32 = 0
     var pad1: UInt32 = 0
     var pad2: UInt32 = 0                       // 对齐到 16 字节
+}
+
+// =============================================================================
+// ViewProjectionUniforms —— 每帧更新,给 vertex shader 做 world → clip 变换。
+//
+// 这是修好"黑屏"的关键 ——
+//   visionOS Compositor 对每个 drawable 必须有 deviceAnchor,它用 deviceAnchor
+//   做 reprojection(motion-to-photon warp)。reprojection 的前提是:顶点输出
+//   的 clip 坐标必须代表真实的 world-space 位置(通过 view * projection 变换得到)。
+//   如果我们只输出 raw NDC, compositor 会把这些像素当成"某个未知 world 位置",
+//   用 deviceAnchor 做 warp 后直接把内容 warp 到相机视野外 → 黑屏。
+//
+// 做法与 Apple 官方 Compositor Services 模板完全一致:
+//   viewMatrix   = (deviceAnchor.originFromAnchorTransform * view.transform).inverse
+//   projMatrix   = drawable.computeProjection(viewIndex:)
+//   vp           = projMatrix * viewMatrix
+//   顶点输出     = vp * modelMatrix * localPos
+// =============================================================================
+
+private struct ViewProjectionUniforms {
+    var vpLeft:  simd_float4x4   // 左眼 world → clip
+    var vpRight: simd_float4x4   // 右眼 world → clip
+    var model:   simd_float4x4   // quad local → world (含头位姿 + 前向平移 + 缩放)
+}
+
+// 单位矩阵平移/缩放的便捷构造(Apple 模板里也有这个模式)
+nonisolated private func matrix4x4_translation(_ x: Float, _ y: Float, _ z: Float) -> simd_float4x4 {
+    return simd_float4x4(
+        SIMD4<Float>(1, 0, 0, 0),
+        SIMD4<Float>(0, 1, 0, 0),
+        SIMD4<Float>(0, 0, 1, 0),
+        SIMD4<Float>(x, y, z, 1)
+    )
+}
+
+nonisolated private func matrix4x4_scale(_ sx: Float, _ sy: Float, _ sz: Float) -> simd_float4x4 {
+    return simd_float4x4(
+        SIMD4<Float>(sx,  0,  0, 0),
+        SIMD4<Float>( 0, sy,  0, 0),
+        SIMD4<Float>( 0,  0, sz, 0),
+        SIMD4<Float>( 0,  0,  0, 1)
+    )
 }
 
 // =============================================================================
@@ -220,12 +265,17 @@ final class StereoVideoRenderer: @unchecked Sendable {
     }
 
     // -------------------------------------------------------------------------
-    // 深度状态 —— 视频是全屏 quad,depth always pass
+    // 深度状态 —— 与 Apple 官方 Compositor Services 模板一致
+    //
+    // visionOS 采用反转 Z(near=1, far=0),深度比较函数用 .greater。
+    // ★ 必须开启 isDepthWriteEnabled,否则 compositor 读到的是 clearDepth(0.0),
+    //   以为所有内容都在"无穷远",motion-to-photon reprojection 就会出错
+    //   → 头部稍微动一下画面就被 warp 走 → 表现为"一闪而过然后黑屏"。
     // -------------------------------------------------------------------------
     private func buildDepthStencilState() {
         let dd = MTLDepthStencilDescriptor()
-        dd.depthCompareFunction = .always
-        dd.isDepthWriteEnabled  = false
+        dd.depthCompareFunction = .greater
+        dd.isDepthWriteEnabled  = true
         depthState = device.makeDepthStencilState(descriptor: dd)
     }
 
@@ -366,10 +416,15 @@ final class StereoVideoRenderer: @unchecked Sendable {
         // ★ DEBUG: 红色背景测试 — 如果连这个都看不到说明渲染根本没到屏幕上
         rpd.colorAttachments[0].clearColor  = MTLClearColor(red: 1, green: 0, blue: 0, alpha: 1)
 
+        // visionOS Compositor Services 采用反转 Z 约定(近=1, 远=0),
+        // Apple 官方模板 clearDepth = 0.0,表示"全部内容都在无穷远处"。
+        // 用 clearDepth = 1.0 会让 Compositor 把画面当作"贴在眼前",
+        // 头稍微一动就触发极大的 reprojection 视差,画面被 warp 出屏幕 → 黑屏。
+        // storeAction 也改为 .store,让 Compositor 能稳定读取深度做 timewarp。
         rpd.depthAttachment.texture     = drawable.depthTextures[0]
         rpd.depthAttachment.loadAction  = .clear
-        rpd.depthAttachment.storeAction = .dontCare
-        rpd.depthAttachment.clearDepth  = 1.0
+        rpd.depthAttachment.storeAction = .store
+        rpd.depthAttachment.clearDepth  = 0.0
 
         // ★ 关键 2: foveation 必须挂 rasterizationRateMap
         // 不挂的话,viewport 是逻辑坐标,纹理是物理坐标,GPU 不知道怎么映射 → 写出去全黑
@@ -385,9 +440,18 @@ final class StereoVideoRenderer: @unchecked Sendable {
         guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
         enc.label = "StereoVideo.RenderPass"
 
+        // ★ 顺序与 Apple 官方 Compositor Services 模板一致:
+        //    1. cullMode / frontFacing
+        //    2. pipelineState  ← 必须在 setVertexAmplificationCount 之前!
+        //    3. depthStencilState
+        //    4. setViewports
+        //    5. setVertexAmplificationCount (需要当前 pipeline 的 maxVertexAmplificationCount)
+        enc.setCullMode(.none)        // quad 是双面的
+        enc.setFrontFacing(.counterClockwise)
+        enc.setRenderPipelineState(pipeline)
+        enc.setDepthStencilState(depth)
+
         // -- Viewports: 每只眼睛一个 (左/右),由 textureMap 提供 --
-        // setViewports(复数) 是 vertex amplification 的标准做法
-        // viewportArrayIndexOffset 在 viewMapping 中决定 GPU 用哪个 viewport
         let viewports = drawable.views.map { $0.textureMap.viewport }
         enc.setViewports(viewports)
 
@@ -405,18 +469,18 @@ final class StereoVideoRenderer: @unchecked Sendable {
             enc.setVertexAmplificationCount(drawable.views.count, viewMappings: &viewMappings)
         }
 
-        enc.setRenderPipelineState(pipeline)
-        enc.setDepthStencilState(depth)
-        enc.setCullMode(.none)        // quad 是双面的
-        enc.setFrontFacing(.counterClockwise)
-
-        // -- Uniforms: 一次性传左右眼参数 --
+        // -- EyePair Uniforms (index 0): SBS UV 偏移 + YCbCr range --
         var uniforms = makeEyePairUniforms()
         enc.setVertexBytes(&uniforms,   length: MemoryLayout<EyePairUniforms>.size, index: 0)
         enc.setFragmentBytes(&uniforms, length: MemoryLayout<EyePairUniforms>.size, index: 0)
 
         // -- 顶点 buffer (slot 1, 与 vertex descriptor bufferIndex = 1 对应) --
         enc.setVertexBuffer(vBuf, offset: 0, index: 1)
+
+        // -- ViewProjection Uniforms (index 2): 真正的 world → clip 变换 --
+        // 这是修黑屏的核心 —— 必须和 deviceAnchor 的 reprojection 数学保持一致。
+        var vpu = makeViewProjectionUniforms(drawable: drawable)
+        enc.setVertexBytes(&vpu, length: MemoryLayout<ViewProjectionUniforms>.stride, index: 2)
 
         // -- 视频纹理 --
         if let yTex = yTexture, let uvTex = cbcrTexture {
@@ -483,6 +547,63 @@ final class StereoVideoRenderer: @unchecked Sendable {
         return EyePairUniforms(
             eyes:        (left, right),
             isFullRange: currentIsFullRange ? 1 : 0
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // makeViewProjectionUniforms —— 每帧根据当前头位姿计算左右眼 view-projection
+    //                               和 quad 的 model matrix
+    //
+    // 设计:
+    //   quad 固定在头部正前方 videoDistance 米处(head-locked 视觉),
+    //   尺寸按 16:9 左右眼单眼分辨率估算 —— 给用户一个合适的沉浸感。
+    //   注意 modelMatrix 已经包含 headFromWorld(将 quad 从 head-local 坐标
+    //   放到 world 坐标),这样 compositor 的 reprojection 看到的是真实的
+    //   world 位置,warp 数学才能自洽 → 不黑屏。
+    // -------------------------------------------------------------------------
+    nonisolated private func makeViewProjectionUniforms(
+        drawable: LayerRenderer.Drawable
+    ) -> ViewProjectionUniforms {
+
+        // deviceAnchor 可能为 nil(ARKit 还没 ready),用单位矩阵兜底。
+        // 即使此时渲染了,compositor 也会丢弃这帧(已经有警告日志),
+        // 下一帧就正常了。
+        let headFromWorld = drawable.deviceAnchor?.originFromAnchorTransform
+            ?? matrix_identity_float4x4
+
+        // Per-eye view matrix: world → eye
+        //   view.transform 是 eye → device 的变换(左右眼偏移)
+        //   headFromWorld  是 device → world
+        //   相乘得到 eye → world,取逆就是 world → eye
+        let viewLeft  = (headFromWorld * drawable.views[0].transform).inverse
+        let viewRight: simd_float4x4
+        if drawable.views.count > 1 {
+            viewRight = (headFromWorld * drawable.views[1].transform).inverse
+        } else {
+            viewRight = viewLeft
+        }
+
+        // Per-eye projection matrix (非对称视锥,含畸变/FOV)
+        let projLeft  = drawable.computeProjection(viewIndex: 0)
+        let projRight = drawable.views.count > 1
+            ? drawable.computeProjection(viewIndex: 1)
+            : projLeft
+
+        // Model matrix —— 把本地 quad [-1,1] 放到头前方 2m,缩放到 3m x 1.68m
+        //   视频原始 1344x376 是 SBS(左右并排),单眼 672x376 ≈ 16:9 长宽比
+        //   halfW / halfH 决定 quad 在 world 里的物理尺寸
+        let videoDistance: Float = 2.0          // 距头 2m
+        let halfW:         Float = 1.5          // 3m 宽(约 73° 水平 FOV)
+        let halfH:         Float = 0.84         // 1.68m 高 (≈ 3 / 1.787)
+
+        let model = headFromWorld
+            * matrix4x4_translation(0, 0, -videoDistance)   // head 前方
+            * matrix4x4_scale(halfW, halfH, 1)              // 本地 quad [-1,1] 缩到物理尺寸
+
+        return ViewProjectionUniforms(
+            vpLeft:  projLeft  * viewLeft,
+            vpRight: projRight * viewRight,
+            model:   model
         )
     }
 
