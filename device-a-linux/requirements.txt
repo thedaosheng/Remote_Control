@@ -1,0 +1,18 @@
+# Remote Control Linux 端 Python 依赖
+#
+# 必须用系统 Python (/usr/bin/python3) 安装到 ~/.local:
+#   /usr/bin/python3 -m pip install --user -r requirements.txt
+#
+# 不能用 conda 的 python 装, 因为 sender 需要 GStreamer python-gi binding,
+# 而 conda 环境里没有 (要装很麻烦)。GStreamer python-gi 是通过 apt 装的
+# (python3-gi + python3-gst-1.0), 这两个 deb 包只对 /usr/bin/python3 生效。
+
+# LiveKit Python SDK (sender 推流 + 接收 VP head pose Data Channel)
+livekit==1.1.5
+livekit-api==1.0.4
+
+# pyserial (达妙电机 USB-CAN 通讯, 不是 SocketCAN!)
+pyserial>=3.5
+
+# numpy (LiveKit VideoFrame + 矩阵运算)
+numpy>=1.21

@@ -1,0 +1,4 @@
+# 校准数据是机器特定的, 不进 git
+scripts/dm_motor_calibration.json
+DM_Control_Python/__pycache__/
+__pycache__/

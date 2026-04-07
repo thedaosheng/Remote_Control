@@ -1,0 +1,33 @@
+# systemd user service —— LiveKit ZED Mini sender
+#
+# 安装位置: ~/.config/systemd/user/lk-sender.service
+# (由 setup_linux.sh 自动安装, 也可手动 cp 过去)
+#
+# 启动:   systemctl --user start lk-sender
+# 停止:   systemctl --user stop lk-sender
+# 日志:   journalctl --user -u lk-sender -f
+# 开机:   systemctl --user enable lk-sender
+#         loginctl enable-linger $USER  # 不登录也跑
+#
+# 注意:
+#   - 必须用系统 Python (/usr/bin/python3), 不能用 conda
+#   - 需要 LiveKit / pyserial / numpy 装在 ~/.local (setup_linux.sh 已处理)
+#   - 占位符 __SCRIPT_DIR__ 会被 setup_linux.sh 替换成实际路径
+
+[Unit]
+Description=LiveKit ZED Mini sender (Vision Pro 立体推流 + 接收 head pose)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u __SCRIPT_DIR__/zedmini_livekit_sender.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# 推流是低延迟实时任务,提高优先级
+Nice=-5
+
+[Install]
+WantedBy=default.target

@@ -57,7 +57,8 @@ LIVEKIT_IDENTITY = "zed-mini-sender"            # 本机身份标识
 ZED_DEVICE = "/dev/video0"      # ZED Mini V4L2 设备路径
 CAM_WIDTH = 1344                # ZED Mini 原始宽度（左右眼拼接 side-by-side）
 CAM_HEIGHT = 376                # ZED Mini 原始高度（WVGA 模式）
-CAM_FPS = 60                    # 采集帧率
+CAM_FPS = 100                   # 采集帧率 (ZED Mini WVGA 1344x376 硬件离散档: 100/60/30/15)
+                                #  拉满 100Hz, 每帧排队延迟从 16.7ms 降到 10ms (-6.7ms)
 
 # 达妙引擎 UDP 转发配置
 DAMO_UDP_HOST = "127.0.0.1"    # 达妙引擎监听地址
@@ -65,7 +66,7 @@ DAMO_UDP_PORT = 9000           # 达妙引擎监听端口
 
 # 打印频率控制
 FRAME_PRINT_EVERY = 300         # 每 N 帧打印一次采集状态
-POSE_PRINT_EVERY = 30           # 每 N 次 pose 打印一次
+POSE_PRINT_EVERY = 6            # 每 N 次 pose 打印一次 (30Hz pose → ~5Hz 打印)
 
 # ==================== 全局状态 ====================
 running = True                  # 全局运行标志，Ctrl+C 时置 False
@@ -367,15 +368,25 @@ class LiveKitSender:
             except Exception:
                 pass  # UDP 发送失败不影响主流程
 
-            # 定期打印 pose 信息
+            # 定期打印 pose (5Hz). ★ 全部用物理含义命名,不再混入数学命名,避免歧义
+            #
+            # 物理 PITCH 点头  ← 数学 roll(绕X 轴)
+            # 物理 YAW   转头  ← 数学 pitch(绕Y 轴)
+            # 物理 ROLL  侧倾  ← 数学 yaw(绕Z 轴)
+            #
+            # (visionOS device frame: +X 右, +Y 上, -Z 前)
+            #
+            # 发到 UDP 9000 的字段名也是物理含义 (pitch=点头, yaw=转头)
             if self.pose_recv_count % POSE_PRINT_EVERY == 0:
                 participant_name = ""
                 if data_packet.participant:
                     participant_name = f" from={data_packet.participant.identity}"
-                print(f"[Pose #{self.pose_recv_count}]{participant_name} "
-                      f"PITCH(点头)={motor_pitch:+7.2f}deg  "
-                      f"YAW(转头)={motor_yaw:+7.2f}deg  "
-                      f"pos=[{pos[0]:.3f},{pos[1]:.3f},{pos[2]:.3f}]")
+                phys_roll_deg = math.degrees(yaw)   # 数学 yaw(绕Z) = 物理侧倾
+                print(f"[Pose #{self.pose_recv_count}]{participant_name}")
+                print(f"   PITCH 点头(抬/低头)  = {motor_pitch:+7.2f}°")
+                print(f"   YAW   转头(左/右转)  = {motor_yaw:+7.2f}°")
+                print(f"   ROLL  侧倾(耳贴肩)   = {phys_roll_deg:+7.2f}°")
+                print(f"   位置 pos = [{pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f}]")
 
     async def _push_frames_loop(self):
         """
@@ -529,6 +540,14 @@ class LiveKitSender:
         publish_options = rtc.TrackPublishOptions()
         publish_options.video_codec = rtc.VideoCodec.H264   # 指定 H264 编码（visionOS 有硬件解码器）
         publish_options.source = rtc.TrackSource.SOURCE_CAMERA  # 标记为摄像头源
+
+        # ★ 显式配置 VideoEncoding —— 不设的话 SDK 默认 max_framerate=30,
+        #   会把我们 100 fps 的推帧砍到 30 fps (这就是 VP 端只看到 30 fps 的根因!)
+        #   max_bitrate 给足 15 Mbps 让 NVENC 不会因为带宽限制丢帧。
+        #   注意: VideoEncoding 是 protobuf message, 不能直接 = 赋值,
+        #   必须逐字段写。
+        publish_options.video_encoding.max_framerate = CAM_FPS
+        publish_options.video_encoding.max_bitrate   = 15_000_000
 
         publication = await self.room.local_participant.publish_track(
             self.video_track,
