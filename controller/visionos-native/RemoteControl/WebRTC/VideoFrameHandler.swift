@@ -1,25 +1,25 @@
 import Foundation
 import CoreVideo
-import LiveKitWebRTC
+import LiveKit
 
-// Receives decoded video frames from WebRTC and stores the latest one
-// for the Metal render loop to consume.
-final class VideoFrameHandler: NSObject, LKRTCVideoRenderer, @unchecked Sendable {
+// 接收 LiveKit 解码后的视频帧，缓存最新一帧供 Metal 渲染循环消费。
+// 实现 LiveKit SDK 2.x 的 VideoRenderer 协议。
+final class VideoFrameHandler: NSObject, VideoRenderer, @unchecked Sendable {
 
     private let lock = NSLock()
-
     private var _latestPixelBuffer: CVPixelBuffer?
     private var _frameCount: Int = 0
     private var _isFullRange: Bool = false
+    private var loggedFirstFrame = false
 
-    // Calibration — written by UI (@MainActor), read by render loop (background)
+    // MARK: - Calibration
     private var _calibration = Calibration()
     var calibration: Calibration {
         get { lock.withLock { _calibration } }
         set { lock.withLock { _calibration = newValue } }
     }
 
-    // Called by the render loop on its dedicated thread
+    // MARK: - 渲染循环消费接口
     nonisolated func consumeLatestFrame()
         -> (buffer: CVPixelBuffer, isFullRange: Bool, calibration: Calibration)?
     {
@@ -31,18 +31,25 @@ final class VideoFrameHandler: NSObject, LKRTCVideoRenderer, @unchecked Sendable
 
     var frameCount: Int { lock.withLock { _frameCount } }
 
-    // MARK: - LKRTCVideoRenderer
+    // MARK: - VideoRenderer 协议
+    @MainActor var isAdaptiveStreamEnabled: Bool { false }
+    @MainActor var adaptiveStreamSize: CGSize { .zero }
+    nonisolated func set(size: CGSize) { }
 
-    nonisolated func setSize(_ size: CGSize) { }
-
-    private var loggedFirstFrame = false
-
-    nonisolated func renderFrame(_ frame: LKRTCVideoFrame?) {
-        guard let frame else { return }
-
+    nonisolated func render(frame: VideoFrame) {
+        // 首帧日志：打印像素格式用于调试
         if !loggedFirstFrame {
             loggedFirstFrame = true
-            print("[VideoFrame] ★ FIRST FRAME RECEIVED! width=\(frame.width) height=\(frame.height) buffer=\(type(of: frame.buffer))")
+            if let cvBuf = frame.buffer as? CVPixelVideoBuffer {
+                let pb = cvBuf.pixelBuffer
+                let fmt = CVPixelBufferGetPixelFormatType(pb)
+                let planes = CVPixelBufferGetPlaneCount(pb)
+                let w = CVPixelBufferGetWidth(pb)
+                let h = CVPixelBufferGetHeight(pb)
+                print("[VideoFrame] ★ FIRST FRAME! \(w)x\(h) format=0x\(String(fmt, radix:16)) planes=\(planes)")
+            } else {
+                print("[VideoFrame] ★ FIRST FRAME! \(frame.dimensions.width)x\(frame.dimensions.height) buffer=\(type(of: frame.buffer))")
+            }
         }
 
         let count = lock.withLock { _frameCount }
@@ -50,8 +57,9 @@ final class VideoFrameHandler: NSObject, LKRTCVideoRenderer, @unchecked Sendable
             print("[VideoFrame] #\(count) frames received")
         }
 
-        if let cvBuffer = frame.buffer as? LKRTCCVPixelBuffer {
-            let pb  = cvBuffer.pixelBuffer
+        // 路径1：CVPixelVideoBuffer
+        if let cvBuffer = frame.buffer as? CVPixelVideoBuffer {
+            let pb = cvBuffer.pixelBuffer
             let fmt = CVPixelBufferGetPixelFormatType(pb)
             let full = (fmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
             lock.withLock {
@@ -59,64 +67,21 @@ final class VideoFrameHandler: NSObject, LKRTCVideoRenderer, @unchecked Sendable
                 _isFullRange = full
                 _frameCount += 1
             }
-        } else if let i420 = frame.buffer as? LKRTCI420Buffer {
-            if let pb = i420ToCVPixelBuffer(i420) {
+            return
+        }
+
+        // 路径2：I420VideoBuffer
+        if let i420 = frame.buffer as? I420VideoBuffer {
+            if let pb = i420.toPixelBuffer() {
                 lock.withLock {
                     _latestPixelBuffer = pb
                     _isFullRange = true
                     _frameCount += 1
                 }
             }
-        }
-    }
-
-    // MARK: - I420 → NV12 CVPixelBuffer
-
-    private func i420ToCVPixelBuffer(_ i420: LKRTCI420Buffer) -> CVPixelBuffer? {
-        let w = Int(i420.width)
-        let h = Int(i420.height)
-        var pb: CVPixelBuffer?
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
-        ]
-        guard CVPixelBufferCreate(
-            nil, w, h,
-            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-            attrs as CFDictionary, &pb
-        ) == kCVReturnSuccess, let pb else { return nil }
-
-        CVPixelBufferLockBaseAddress(pb, [])
-        defer { CVPixelBufferUnlockBaseAddress(pb, []) }
-
-        // Copy Y plane
-        if let dst = CVPixelBufferGetBaseAddressOfPlane(pb, 0) {
-            let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
-            var src = i420.dataY
-            for row in 0..<h {
-                memcpy(dst.advanced(by: row * stride), src, w)
-                src = src.advanced(by: Int(i420.strideY))
-            }
+            return
         }
 
-        // Interleave Cb+Cr into NV12 UV plane
-        if let dst = CVPixelBufferGetBaseAddressOfPlane(pb, 1) {
-            let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
-            let uvH = h / 2
-            let uvW = w / 2
-            var srcU = i420.dataU
-            var srcV = i420.dataV
-            for row in 0..<uvH {
-                let rowPtr = dst.advanced(by: row * stride)
-                    .bindMemory(to: UInt8.self, capacity: uvW * 2)
-                for col in 0..<uvW {
-                    rowPtr[col * 2]     = srcU[col]
-                    rowPtr[col * 2 + 1] = srcV[col]
-                }
-                srcU = srcU.advanced(by: Int(i420.strideU))
-                srcV = srcV.advanced(by: Int(i420.strideV))
-            }
-        }
-
-        return pb
+        print("[VideoFrame] ⚠ Unknown buffer: \(type(of: frame.buffer))")
     }
 }

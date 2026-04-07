@@ -6,101 +6,178 @@ import CoreVideo
 import ARKit
 import simd
 
-// ---------------------------------------------------------------------------
-// CompositorLayer configuration
-// ---------------------------------------------------------------------------
+// =============================================================================
+// CompositorLayer 配置
+//   - layered 布局（必须，texture array,每个 slice 对应一只眼睛）
+//   - foveation 开启（vision OS 26 vertex amplification 流程依赖 rasterizationRateMap）
+//   - depth/color 选用 visionOS 标准格式
+// =============================================================================
 
 struct VideoLayerConfiguration: CompositorLayerConfiguration {
     func makeConfiguration(
         capabilities: LayerRenderer.Capabilities,
         configuration: inout LayerRenderer.Configuration
     ) {
-        configuration.depthFormat  = .depth32Float
-        configuration.colorFormat  = .bgra8Unorm_srgb
+        // 颜色 / 深度 像素格式 —— visionOS Compositor 推荐配置
+        configuration.depthFormat = .depth32Float
+        configuration.colorFormat = .bgra8Unorm_srgb
 
-        let opts: LayerRenderer.Capabilities.SupportedLayoutsOptions = []
+        // 查询设备支持的 layout，前提：开启 foveation
+        // visionOS 26 + Vision Pro 上 layered 是最高效的布局
+        let opts: LayerRenderer.Capabilities.SupportedLayoutsOptions = [.foveationEnabled]
         let supported = capabilities.supportedLayouts(options: opts)
-        configuration.layout = supported.contains(.dedicated) ? .dedicated : .layered
+
+        // 必须使用 layered（2DArray）—— vertex amplification 单 pass 渲染的前提
+        // 单个 colorTexture[0] 是 type2DArray，arrayLength = 2（左右眼分别为 slice 0/1）
+        configuration.layout = supported.contains(.layered) ? .layered : .shared
+
+        // 必须开启 foveation —— Apple 模板里 layered 渲染依赖 rasterizationRateMap
+        configuration.isFoveationEnabled = capabilities.supportsFoveation
     }
 }
 
-// ---------------------------------------------------------------------------
-// Quad geometry — fullscreen NDC [-1,1]²
-// ---------------------------------------------------------------------------
+// =============================================================================
+// 全屏四边形顶点定义 (NDC [-1,1]^2 + UV [0,1]^2)
+// 单 pass + vertex amplification:
+//   一个 4 顶点 quad 同时绘制到左右眼两个 slice
+//   shader 内部根据 [[amplification_id]] 选择不同 UV 子区
+// =============================================================================
 
 private struct QuadVertex {
-    var position: SIMD2<Float>
-    var uv:       SIMD2<Float>
+    var position: SIMD2<Float>   // 裁剪空间坐标 (NDC)
+    var uv:       SIMD2<Float>   // 单位纹理坐标，未做 SBS 偏移
 }
 
-private let quadVertices: [QuadVertex] = [
-    QuadVertex(position: SIMD2(-1,  1), uv: SIMD2(0, 0)),
-    QuadVertex(position: SIMD2( 1,  1), uv: SIMD2(1, 0)),
-    QuadVertex(position: SIMD2(-1, -1), uv: SIMD2(0, 1)),
-    QuadVertex(position: SIMD2( 1, -1), uv: SIMD2(1, 1)),
+// 4 顶点 + 6 索引画一个全屏矩形
+// nonisolated 避免渲染线程 (非 MainActor) 引用时的 isolation warning
+nonisolated private let quadVertices: [QuadVertex] = [
+    QuadVertex(position: SIMD2(-1,  1), uv: SIMD2(0, 0)),   // 左上
+    QuadVertex(position: SIMD2( 1,  1), uv: SIMD2(1, 0)),   // 右上
+    QuadVertex(position: SIMD2(-1, -1), uv: SIMD2(0, 1)),   // 左下
+    QuadVertex(position: SIMD2( 1, -1), uv: SIMD2(1, 1)),   // 右下
 ]
 
-private let quadIndices: [UInt16] = [0, 2, 1,  1, 2, 3]
+nonisolated private let quadIndices: [UInt16] = [0, 2, 1,  1, 2, 3]
 
-// Must match EyeUniforms in VideoShaders.metal
-private struct EyeUniforms {
-    var uvOffsetX:   Float
-    var uvScaleX:    Float
-    var uvOffsetY:   Float
-    var uvScaleY:    Float
-    var isFullRange: UInt32
-    var pad0: Float = 0; var pad1: Float = 0; var pad2: Float = 0
+// =============================================================================
+// EyeUniforms —— 一次传左右眼两组 UV 变换 + YCbCr range 标志
+// 必须与 VideoShaders.metal 中的 EyeUniforms / EyePairUniforms 完全匹配。
+// =============================================================================
+
+private struct EyeParams {
+    var uvOffsetX: Float       // SBS 纹理水平偏移
+    var uvScaleX:  Float       // 水平缩放（= 0.5 * cal.scale）
+    var uvOffsetY: Float       // 垂直偏移
+    var uvScaleY:  Float       // 垂直缩放
+    var pad0: Float = 0
+    var pad1: Float = 0
+    var pad2: Float = 0
+    var pad3: Float = 0        // 16 字节对齐
 }
 
-// ---------------------------------------------------------------------------
-// StereoVideoRenderer
-// ---------------------------------------------------------------------------
+private struct EyePairUniforms {
+    var eyes:        (EyeParams, EyeParams)   // 0 = 左眼, 1 = 右眼 —— 对应 [[amplification_id]]
+    var isFullRange: UInt32                   // 1 = full range, 0 = video range BT.601
+    var pad0: UInt32 = 0
+    var pad1: UInt32 = 0
+    var pad2: UInt32 = 0                       // 对齐到 16 字节
+}
+
+// =============================================================================
+// StereoVideoRenderer —— CompositorServices + Metal + Vertex Amplification
+//
+// 渲染流程（每帧）：
+//   1. queryNextFrame -> startUpdate -> startSubmission
+//   2. queryDrawables 拿到 1 个 LayerRenderer.Drawable（builtIn）
+//   3. 设置 deviceAnchor（让 compositor 做 reprojection,使画面跟头动）
+//   4. 单个 render pass:
+//        - colorAttachment[0] = drawable.colorTextures[0]   (type2DArray, 2 slice)
+//        - depthAttachment    = drawable.depthTextures[0]
+//        - rasterizationRateMap = drawable.rasterizationRateMaps.first  (foveation)
+//        - renderTargetArrayLength = 2                       (layered)
+//   5. setViewports([leftViewport, rightViewport])           (复数)
+//   6. setVertexAmplificationCount(2, viewMappings: [...])
+//        其中两个 viewMapping 的 viewportArrayIndexOffset/renderTargetArrayIndexOffset 分别 = 0 / 1
+//   7. drawIndexedPrimitives 一次提交 6 个索引 -> GPU 自动放大成 2 份分别写到两个 slice
+//   8. encodePresent / commit / endSubmission
+//
+// shader 内部:
+//   vertex   shader 接收 [[amplification_id]] uint amp_id, 用 amp_id 索引 EyePairUniforms.eyes
+//                  并输出 [[render_target_array_index]] = amp_id 让 GPU 写到对应 slice
+//   fragment shader 用插值后的 uv（已被 SBS 偏移过）采 NV12 双平面 -> RGB
+// =============================================================================
 
 final class StereoVideoRenderer: @unchecked Sendable {
 
-    private let layerRenderer:    LayerRenderer
-    private let frameHandler:     VideoFrameHandler
-    private let device:           MTLDevice
-    private let commandQueue:     MTLCommandQueue
-    private var pipelineState:    MTLRenderPipelineState?
-    private var vertexBuffer:     MTLBuffer?
-    private var indexBuffer:      MTLBuffer?
-    private var textureCache:     CVMetalTextureCache?
+    // ---- 注入依赖 ----
+    // LayerRenderer 是 ObjC 桥接类型,默认推断为 MainActor 隔离
+    // 但渲染线程必须能访问它,所以标 nonisolated(unsafe)
+    private nonisolated(unsafe) let layerRenderer: LayerRenderer
+    private let frameHandler:  VideoFrameHandler
 
-    // ARKit — provides device anchor for each frame
-    private let arSession = ARKitSession()
-    private let worldTracking = WorldTrackingProvider()
+    // ---- Metal ----
+    // 所有 nonisolated 的属性都用 nonisolated(unsafe),因为本类是 @unchecked Sendable
+    // 渲染线程在专用 Thread 里跑,所有访问都是单线程的,不会有竞态
+    private let device:                              MTLDevice
+    private let commandQueue:                        MTLCommandQueue
+    private nonisolated(unsafe) var pipelineState:   MTLRenderPipelineState?
+    private nonisolated(unsafe) var depthState:      MTLDepthStencilState?
+    private nonisolated(unsafe) var vertexBuffer:    MTLBuffer?
+    private nonisolated(unsafe) var indexBuffer:     MTLBuffer?
+    private nonisolated(unsafe) var textureCache:    CVMetalTextureCache?
 
-    // Cached video textures
-    private var yTexture:    MTLTexture?
-    private var cbcrTexture: MTLTexture?
-    private var lastBuffer:  CVPixelBuffer?
+    // ---- ARKit (头部位姿) ----
+    private let arSession                       = ARKitSession()
+    private let worldTracking                   = WorldTrackingProvider()
+    private nonisolated(unsafe) var arReady     = false
 
+    // ---- 视频纹理状态 ----
+    private nonisolated(unsafe) var yTexture:           MTLTexture?
+    private nonisolated(unsafe) var cbcrTexture:        MTLTexture?
+    private nonisolated(unsafe) var lastBuffer:         CVPixelBuffer?
+    private nonisolated(unsafe) var currentIsFullRange: Bool = true
+
+    // ---- 调试统计 ----
+    private nonisolated(unsafe) var renderCount:     Int = 0
+    private nonisolated(unsafe) var textureLogCount: Int = 0
+
+    // -------------------------------------------------------------------------
+    // init —— 构建 Metal 资源、初始化 ARKit
+    // -------------------------------------------------------------------------
     init(layerRenderer: LayerRenderer, frameHandler: VideoFrameHandler) {
         self.layerRenderer = layerRenderer
         self.frameHandler  = frameHandler
 
-        guard let dev = MTLCreateSystemDefaultDevice() else {
-            fatalError("Metal not available")
+        // visionOS 26: LayerRenderer 自带 device,直接用避免多 device 不一致
+        self.device = layerRenderer.device
+        guard let q = device.makeCommandQueue() else {
+            fatalError("Cannot create Metal command queue")
         }
-        self.device       = dev
-        self.commandQueue = dev.makeCommandQueue()!
+        self.commandQueue = q
 
+        // 构建 pipeline / 顶点 buffer / 纹理 cache
         buildPipeline()
+        buildDepthStencilState()
         buildQuadBuffers()
-        CVMetalTextureCacheCreate(nil, nil, dev, nil, &textureCache)
+        CVMetalTextureCacheCreate(nil, nil, device, nil, &textureCache)
     }
 
-    // MARK: - Build resources
-
+    // -------------------------------------------------------------------------
+    // Pipeline 构建 —— 关键：maxVertexAmplificationCount = viewCount(=2)
+    // 没有这一行，下面的 setVertexAmplificationCount(2, ...) 会运行时报错
+    // -------------------------------------------------------------------------
     private func buildPipeline() {
         guard let lib = device.makeDefaultLibrary() else {
-            print("[Render] no default Metal library")
+            print("[Pipeline] FATAL: no default Metal library")
             return
         }
         let vs = lib.makeFunction(name: "vs_video")
         let fs = lib.makeFunction(name: "fs_video_nv12")
 
+        // 顶点描述符:
+        //   attribute(0) = position (float2) at offset 0
+        //   attribute(1) = uv       (float2) at offset 8
+        //   两者共享 buffer(1) (与 setVertexBuffer(buffer, offset: 0, index: 1) 对应)
         let vd = MTLVertexDescriptor()
         vd.attributes[0].format      = .float2
         vd.attributes[0].offset      = 0
@@ -110,19 +187,51 @@ final class StereoVideoRenderer: @unchecked Sendable {
         vd.attributes[1].bufferIndex = 1
         vd.layouts[1].stride         = MemoryLayout<QuadVertex>.stride
 
-        let pd                            = MTLRenderPipelineDescriptor()
-        pd.vertexFunction                 = vs
-        pd.fragmentFunction               = fs
-        pd.vertexDescriptor               = vd
-        pd.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
-        pd.depthAttachmentPixelFormat      = .depth32Float
+        let pd = MTLRenderPipelineDescriptor()
+        pd.vertexFunction   = vs
+        pd.fragmentFunction = fs
+        pd.vertexDescriptor = vd
 
-        pipelineState = try? device.makeRenderPipelineState(descriptor: pd)
-        if pipelineState == nil {
-            print("[Render] ✗ Pipeline creation failed!")
+        // 必须从 LayerRenderer 配置取实际格式（避免 dual-pass mismatch）
+        let cfg = layerRenderer.configuration
+        pd.colorAttachments[0].pixelFormat = cfg.colorFormat
+        pd.depthAttachmentPixelFormat      = cfg.depthFormat
+
+        // ★ 关键 1: 最大 vertex amplification 数 = viewCount (=2)
+        let viewCount = layerRenderer.properties.viewCount
+        pd.maxVertexAmplificationCount = max(viewCount, 1)
+
+        // ★ 关键 2: 必须设置 inputPrimitiveTopology
+        // 当 vertex shader 写 [[render_target_array_index]] 时,
+        // Metal 需要知道图元类型才能正确路由到 array slice
+        pd.inputPrimitiveTopology = .triangle
+
+        print("[Pipeline] viewCount=\(viewCount) maxAmp=\(pd.maxVertexAmplificationCount) " +
+              "color=\(cfg.colorFormat.rawValue) depth=\(cfg.depthFormat.rawValue) " +
+              "layout=\(cfg.layout == .layered ? "layered" : (cfg.layout == .shared ? "shared" : "dedicated")) " +
+              "foveation=\(cfg.isFoveationEnabled)")
+
+        do {
+            pipelineState = try device.makeRenderPipelineState(descriptor: pd)
+            print("[Pipeline] Created OK")
+        } catch {
+            print("[Pipeline] FAILED: \(error)")
         }
     }
 
+    // -------------------------------------------------------------------------
+    // 深度状态 —— 视频是全屏 quad,depth always pass
+    // -------------------------------------------------------------------------
+    private func buildDepthStencilState() {
+        let dd = MTLDepthStencilDescriptor()
+        dd.depthCompareFunction = .always
+        dd.isDepthWriteEnabled  = false
+        depthState = device.makeDepthStencilState(descriptor: dd)
+    }
+
+    // -------------------------------------------------------------------------
+    // 顶点 / 索引 buffer
+    // -------------------------------------------------------------------------
     private func buildQuadBuffers() {
         vertexBuffer = device.makeBuffer(
             bytes: quadVertices,
@@ -136,25 +245,25 @@ final class StereoVideoRenderer: @unchecked Sendable {
         )
     }
 
-    // MARK: - Render loop
-
+    // -------------------------------------------------------------------------
+    // 启动渲染循环 + ARKit 头追踪
+    // -------------------------------------------------------------------------
     nonisolated func startRenderLoop() {
-        print("[Render] startRenderLoop called")
+        print("[Render] startRenderLoop")
 
-        // Start ARKit world tracking for device anchors
-        Task {
+        Task { [self] in
             do {
-                print("[Render] Starting ARKit session...")
+                print("[Render] Starting ARKit session")
                 try await arSession.run([worldTracking])
                 arReady = true
-                print("[Render] ✓ ARKit WorldTrackingProvider started")
+                print("[Render] ARKit ready")
             } catch {
-                print("[Render] ✗ ARKit failed: \(error)")
+                print("[Render] ARKit failed: \(error)")
             }
         }
 
         let t = Thread { [self] in renderLoop() }
-        t.name = "StereoVideo.RenderThread"
+        t.name             = "StereoVideo.RenderThread"
         t.qualityOfService = .userInteractive
         t.start()
         print("[Render] Render thread started")
@@ -166,8 +275,9 @@ final class StereoVideoRenderer: @unchecked Sendable {
             case .paused:
                 layerRenderer.waitUntilRunning()
             case .running:
-                renderFrame()
+                autoreleasepool { renderFrame() }
             case .invalidated:
+                print("[Render] LayerRenderer invalidated, exit loop")
                 return
             @unknown default:
                 break
@@ -175,158 +285,262 @@ final class StereoVideoRenderer: @unchecked Sendable {
         }
     }
 
-    private var renderCount = 0
-    private var arReady = false
-
+    // -------------------------------------------------------------------------
+    // 单帧渲染入口
+    // -------------------------------------------------------------------------
     nonisolated private func renderFrame() {
+        // 1. 取下一帧
         guard let frame = layerRenderer.queryNextFrame() else { return }
-        guard let drawable = frame.queryDrawables().first else { return }
-        guard let pipeline = pipelineState else {
-            if renderCount == 0 { print("[Render] ✗ pipelineState is nil") }
-            return
-        }
-        guard let vBuf = vertexBuffer, let iBuf = indexBuffer else { return }
+
+        // 2. update 阶段（与 submission 阶段分离,Apple 模板要求）
+        frame.startUpdate()
+        // 我们没有 CPU 侧 game state,直接进入 endUpdate
+        frame.endUpdate()
+
+        // 3. 等到 optimalInputTime（让 compositor 给最准确的预测时间）
+        guard let timing = frame.predictTiming() else { return }
+        LayerRenderer.Clock().wait(until: timing.optimalInputTime)
+
+        // 4. 查询 drawables（visionOS 26: 数组,builtIn / capture）
+        let drawables = frame.queryDrawables()
+        guard !drawables.isEmpty else { return }
+
+        // 5. 创建 command buffer
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
 
-        // ★ visionOS 26: Must set device anchor or drawable won't be presented.
-        // Use CACurrentMediaTime() which shares the same timebase as ARKit.
-        let anchor = worldTracking.queryDeviceAnchor(atTimestamp: CACurrentMediaTime())
-        drawable.deviceAnchor = anchor
+        // 6. submission 阶段开始
+        frame.startSubmission()
+
+        // 7. 上传最新视频帧到 Metal 纹理
+        updateTextures()
+
+        // 8. 取头部位姿（要用 trackableAnchorTime,跟 frame 预测对齐）
+        let trackingTime = timing.trackableAnchorTime.timeInterval
+        let anchor = arReady
+            ? worldTracking.queryDeviceAnchor(atTimestamp: trackingTime)
+            : nil
 
         renderCount += 1
 
-        // Log first few frames and periodically
-        if renderCount <= 5 || renderCount % 300 == 0 {
-            let hasVideo = (yTexture != nil && cbcrTexture != nil)
-            print("[Render] #\(renderCount) views=\(drawable.views.count) anchor=\(anchor != nil) video=\(hasVideo) arReady=\(arReady)")
+        // 9. 遍历 drawables —— 通常只有一个 builtIn,可能多一个 capture
+        for (dIdx, drawable) in drawables.enumerated() {
+            drawable.deviceAnchor = anchor
+
+            if renderCount <= 5 || renderCount % 300 == 0 {
+                let hasVideo = (yTexture != nil && cbcrTexture != nil)
+                print("[Render] #\(renderCount) drawable\(dIdx)/\(drawables.count) " +
+                      "views=\(drawable.views.count) anchor=\(anchor != nil) " +
+                      "video=\(hasVideo) rrm=\(drawable.rasterizationRateMaps.count) " +
+                      "colorArr=\(drawable.colorTextures[0].arrayLength)")
+            }
+
+            renderDrawable(drawable: drawable, cmdBuf: cmdBuf)
+            // encodePresent 必须在 makeRenderCommandEncoder.endEncoding() 之后,在 commit 之前
+            drawable.encodePresent(commandBuffer: cmdBuf)
         }
 
-        // If no anchor yet, still submit frame (clear to black) but it won't display.
-        // Once ARKit provides anchors, frames will start displaying.
-        frame.startSubmission()
-
-        updateTextures()
-
-        for i in 0..<drawable.views.count {
-            renderEye(
-                index: i,
-                view: drawable.views[i],
-                drawable: drawable,
-                pipeline: pipeline,
-                vertexBuf: vBuf,
-                indexBuf: iBuf,
-                cmdBuf: cmdBuf
-            )
-        }
-
-        drawable.encodePresent(commandBuffer: cmdBuf)
+        // 10. 提交并通知 compositor
         cmdBuf.commit()
-
         frame.endSubmission()
     }
 
-    nonisolated private func renderEye(
-        index: Int,
-        view: LayerRenderer.Drawable.View,
+    // -------------------------------------------------------------------------
+    // 单 drawable 单 pass 渲染 —— 这里做 vertex amplification
+    // -------------------------------------------------------------------------
+    nonisolated private func renderDrawable(
         drawable: LayerRenderer.Drawable,
-        pipeline: MTLRenderPipelineState,
-        vertexBuf: MTLBuffer,
-        indexBuf: MTLBuffer,
         cmdBuf: MTLCommandBuffer
     ) {
-        let texMap = view.textureMap
+        guard let pipeline = pipelineState,
+              let depth    = depthState,
+              let vBuf     = vertexBuffer,
+              let iBuf     = indexBuffer
+        else { return }
 
+        // -- Render pass descriptor: 单 attachment + array length = views.count --
         let rpd = MTLRenderPassDescriptor()
-        rpd.colorAttachments[0].texture     = drawable.colorTextures[texMap.textureIndex]
+
+        rpd.colorAttachments[0].texture     = drawable.colorTextures[0]
         rpd.colorAttachments[0].loadAction  = .clear
         rpd.colorAttachments[0].storeAction = .store
-        rpd.colorAttachments[0].clearColor  = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        rpd.colorAttachments[0].slice       = texMap.sliceIndex
+        // ★ DEBUG: 红色背景测试 — 如果连这个都看不到说明渲染根本没到屏幕上
+        rpd.colorAttachments[0].clearColor  = MTLClearColor(red: 1, green: 0, blue: 0, alpha: 1)
 
-        rpd.depthAttachment.texture         = drawable.depthTextures[texMap.textureIndex]
-        rpd.depthAttachment.loadAction      = .clear
-        rpd.depthAttachment.storeAction     = .dontCare
-        rpd.depthAttachment.clearDepth      = 1.0
-        rpd.depthAttachment.slice           = texMap.sliceIndex
+        rpd.depthAttachment.texture     = drawable.depthTextures[0]
+        rpd.depthAttachment.loadAction  = .clear
+        rpd.depthAttachment.storeAction = .dontCare
+        rpd.depthAttachment.clearDepth  = 1.0
+
+        // ★ 关键 2: foveation 必须挂 rasterizationRateMap
+        // 不挂的话,viewport 是逻辑坐标,纹理是物理坐标,GPU 不知道怎么映射 → 写出去全黑
+        // Apple 模板用 .first 是因为 layered 布局下两眼共用一张 array texture
+        rpd.rasterizationRateMap = drawable.rasterizationRateMaps.first
+
+        // ★ 关键 3: layered 布局必须设 renderTargetArrayLength
+        // 这个值 = views.count = 2 —— 告诉 GPU 这次 pass 要写到 array texture 的 2 个 slice
+        if layerRenderer.configuration.layout == .layered {
+            rpd.renderTargetArrayLength = drawable.views.count
+        }
 
         guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
-        enc.setViewport(view.textureMap.viewport)
+        enc.label = "StereoVideo.RenderPass"
+
+        // -- Viewports: 每只眼睛一个 (左/右),由 textureMap 提供 --
+        // setViewports(复数) 是 vertex amplification 的标准做法
+        // viewportArrayIndexOffset 在 viewMapping 中决定 GPU 用哪个 viewport
+        let viewports = drawable.views.map { $0.textureMap.viewport }
+        enc.setViewports(viewports)
+
+        // -- Vertex amplification: 一次 draw 调用绘制 N 份 --
+        if drawable.views.count > 1 {
+            // 两个 viewMapping:
+            //   index 0 (左眼): viewport[0], slice 0
+            //   index 1 (右眼): viewport[1], slice 1
+            var viewMappings = (0..<drawable.views.count).map { i in
+                MTLVertexAmplificationViewMapping(
+                    viewportArrayIndexOffset:    UInt32(i),
+                    renderTargetArrayIndexOffset: UInt32(i)
+                )
+            }
+            enc.setVertexAmplificationCount(drawable.views.count, viewMappings: &viewMappings)
+        }
+
         enc.setRenderPipelineState(pipeline)
+        enc.setDepthStencilState(depth)
+        enc.setCullMode(.none)        // quad 是双面的
+        enc.setFrontFacing(.counterClockwise)
 
-        var uniforms = makeUniforms(eyeIndex: index)
-        enc.setVertexBytes(&uniforms,   length: MemoryLayout<EyeUniforms>.size, index: 0)
-        enc.setFragmentBytes(&uniforms, length: MemoryLayout<EyeUniforms>.size, index: 0)
-        enc.setVertexBuffer(vertexBuf, offset: 0, index: 1)
+        // -- Uniforms: 一次性传左右眼参数 --
+        var uniforms = makeEyePairUniforms()
+        enc.setVertexBytes(&uniforms,   length: MemoryLayout<EyePairUniforms>.size, index: 0)
+        enc.setFragmentBytes(&uniforms, length: MemoryLayout<EyePairUniforms>.size, index: 0)
 
-        if let yTex = yTexture, let uTex = cbcrTexture {
-            enc.setFragmentTexture(yTex, index: 0)
-            enc.setFragmentTexture(uTex, index: 1)
+        // -- 顶点 buffer (slot 1, 与 vertex descriptor bufferIndex = 1 对应) --
+        enc.setVertexBuffer(vBuf, offset: 0, index: 1)
+
+        // -- 视频纹理 --
+        if let yTex = yTexture, let uvTex = cbcrTexture {
+            if renderCount <= 3 {
+                let v0 = drawable.views[0].textureMap.viewport
+                let v1 = drawable.views.count > 1 ? drawable.views[1].textureMap.viewport
+                                                   : drawable.views[0].textureMap.viewport
+                let colorTex = drawable.colorTextures[0]
+                print("[Render] DRAW #\(renderCount):")
+                print("  colorTex \(colorTex.width)x\(colorTex.height) type=\(colorTex.textureType.rawValue) arr=\(colorTex.arrayLength)")
+                print("  vp0 x=\(v0.originX) y=\(v0.originY) w=\(v0.width) h=\(v0.height)")
+                print("  vp1 x=\(v1.originX) y=\(v1.originY) w=\(v1.width) h=\(v1.height)")
+                print("  rrm=\(drawable.rasterizationRateMaps.count > 0 ? "SET" : "NONE")")
+                print("  Y    \(yTex.width)x\(yTex.height) fmt=\(yTex.pixelFormat.rawValue)")
+                print("  CbCr \(uvTex.width)x\(uvTex.height) fmt=\(uvTex.pixelFormat.rawValue)")
+                print("  L oX=\(uniforms.eyes.0.uvOffsetX) sX=\(uniforms.eyes.0.uvScaleX) oY=\(uniforms.eyes.0.uvOffsetY) sY=\(uniforms.eyes.0.uvScaleY)")
+                print("  R oX=\(uniforms.eyes.1.uvOffsetX) sX=\(uniforms.eyes.1.uvScaleX) oY=\(uniforms.eyes.1.uvOffsetY) sY=\(uniforms.eyes.1.uvScaleY)")
+                print("  full=\(uniforms.isFullRange)")
+            }
+
+            enc.setFragmentTexture(yTex,  index: 0)
+            enc.setFragmentTexture(uvTex, index: 1)
+
             enc.drawIndexedPrimitives(
                 type:              .triangle,
                 indexCount:        quadIndices.count,
                 indexType:         .uint16,
-                indexBuffer:       indexBuf,
+                indexBuffer:       iBuf,
                 indexBufferOffset: 0
             )
+        } else if renderCount <= 3 {
+            print("[Render] #\(renderCount) NO video texture yet")
         }
+
         enc.endEncoding()
     }
 
-    // MARK: - UV helpers
-
-    nonisolated private func makeUniforms(eyeIndex: Int) -> EyeUniforms {
+    // -------------------------------------------------------------------------
+    // EyePairUniforms 计算 —— 把 SBS UV 区段算好,左右眼一次传完
+    // -------------------------------------------------------------------------
+    nonisolated private func makeEyePairUniforms() -> EyePairUniforms {
         let cal = frameHandler.calibration
+
+        // 每只眼睛占 SBS 纹理宽度的一半,再做 cal.scale 比例缩放居中
         let halfScale = 0.5 * cal.scale
         let hMargin   = (0.5 - halfScale) * 0.5
 
-        let offsetX: Float
-        if eyeIndex == 0 {
-            offsetX = hMargin + cal.leftHOffset
-        } else {
-            offsetX = 0.5 + hMargin + cal.rightHOffset
-        }
+        // 左眼 UV 段: [hMargin + leftHOffset, hMargin + leftHOffset + halfScale]
+        let left = EyeParams(
+            uvOffsetX: hMargin + cal.leftHOffset,
+            uvScaleX:  halfScale,
+            uvOffsetY: (1.0 - cal.vscale) * 0.5 + cal.vOffset,
+            uvScaleY:  cal.vscale
+        )
 
-        let vMargin = (1.0 - cal.vscale) * 0.5
-        let offsetY = vMargin + cal.vOffset
+        // 右眼 UV 段: [0.5 + hMargin + rightHOffset, ...]
+        let right = EyeParams(
+            uvOffsetX: 0.5 + hMargin + cal.rightHOffset,
+            uvScaleX:  halfScale,
+            uvOffsetY: (1.0 - cal.vscale) * 0.5 + cal.vOffset,
+            uvScaleY:  cal.vscale
+        )
 
-        return EyeUniforms(
-            uvOffsetX:   offsetX,
-            uvScaleX:    halfScale,
-            uvOffsetY:   offsetY,
-            uvScaleY:    cal.vscale,
-            isFullRange: 0
+        return EyePairUniforms(
+            eyes:        (left, right),
+            isFullRange: currentIsFullRange ? 1 : 0
         )
     }
 
-    // MARK: - Texture upload from CVPixelBuffer (NV12)
-
+    // -------------------------------------------------------------------------
+    // 从 CVPixelBuffer (NV12) 更新 Metal 纹理 (零拷贝,IOSurface 共享)
+    // -------------------------------------------------------------------------
     nonisolated private func updateTextures() {
-        guard
-            let cache = textureCache,
-            let data  = frameHandler.consumeLatestFrame()
+        guard let cache = textureCache,
+              let data  = frameHandler.consumeLatestFrame()
         else { return }
 
         let pb = data.buffer
-        if pb === lastBuffer { return }
-        lastBuffer = pb
+        lastBuffer         = pb
+        currentIsFullRange = data.isFullRange
+
+        // 周期性 flush 防止旧纹理累积占内存
+        CVMetalTextureCacheFlush(cache, 0)
+
+        let w0 = CVPixelBufferGetWidthOfPlane(pb, 0)
+        let h0 = CVPixelBufferGetHeightOfPlane(pb, 0)
+        let w1 = CVPixelBufferGetWidthOfPlane(pb, 1)
+        let h1 = CVPixelBufferGetHeightOfPlane(pb, 1)
 
         var cvY:    CVMetalTexture?
         var cvCbCr: CVMetalTexture?
 
-        CVMetalTextureCacheCreateTextureFromImage(
-            nil, cache, pb, nil, .r8Unorm,
-            CVPixelBufferGetWidthOfPlane(pb, 0),
-            CVPixelBufferGetHeightOfPlane(pb, 0),
-            0, &cvY
+        // plane 0 = Y (r8Unorm)
+        let statusY = CVMetalTextureCacheCreateTextureFromImage(
+            nil, cache, pb, nil, .r8Unorm, w0, h0, 0, &cvY
         )
-        CVMetalTextureCacheCreateTextureFromImage(
-            nil, cache, pb, nil, .rg8Unorm,
-            CVPixelBufferGetWidthOfPlane(pb, 1),
-            CVPixelBufferGetHeightOfPlane(pb, 1),
-            1, &cvCbCr
+        // plane 1 = CbCr (rg8Unorm)
+        let statusCbCr = CVMetalTextureCacheCreateTextureFromImage(
+            nil, cache, pb, nil, .rg8Unorm, w1, h1, 1, &cvCbCr
         )
 
-        if let cvY    { yTexture    = CVMetalTextureGetTexture(cvY)    }
+        textureLogCount += 1
+        if textureLogCount <= 3 {
+            let hasIO = CVPixelBufferGetIOSurface(pb) != nil
+            print("[Texture] #\(textureLogCount) Y:\(statusY == 0 ? "OK" : "FAIL(\(statusY))") " +
+                  "CbCr:\(statusCbCr == 0 ? "OK" : "FAIL(\(statusCbCr))") " +
+                  "planes=\(w0)x\(h0)+\(w1)x\(h1) ioSurface=\(hasIO) full=\(currentIsFullRange)")
+        }
+
+        if let cvY    { yTexture    = CVMetalTextureGetTexture(cvY) }
         if let cvCbCr { cbcrTexture = CVMetalTextureGetTexture(cvCbCr) }
+    }
+}
+
+// =============================================================================
+// LayerRenderer.Clock.Instant -> TimeInterval —— Apple 模板里的辅助
+// 供 trackableAnchorTime 转 ARKit 期望的 TimeInterval (秒)
+// =============================================================================
+
+extension LayerRenderer.Clock.Instant {
+    // nonisolated 让渲染线程可以从 Instant 算 TimeInterval 而不触发 MainActor 检查
+    fileprivate nonisolated var timeInterval: TimeInterval {
+        let comps = LayerRenderer.Clock.Instant.epoch.duration(to: self).components
+        let nanos = TimeInterval(comps.attoseconds / 1_000_000_000)
+        return TimeInterval(comps.seconds) + (nanos / TimeInterval(NSEC_PER_SEC))
     }
 }
