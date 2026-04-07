@@ -38,7 +38,8 @@ struct LiveKitRemoteControlApp: App {
             CompositorLayer(configuration: VideoLayerConfiguration()) { layerRenderer in
                 let renderer = StereoVideoRenderer(
                     layerRenderer: layerRenderer,
-                    frameHandler: appState.videoFrameHandler
+                    frameHandler: appState.videoFrameHandler,
+                    headPoseTracker: appState.headPoseTracker
                 )
                 renderer.startRenderLoop()
             }

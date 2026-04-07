@@ -28,9 +28,14 @@ struct RemoteControlApp: App {
         // 用 vertex amplification 在单 pass 内同时画左右眼
         ImmersiveSpace(id: "stereoVideo") {
             CompositorLayer(configuration: VideoLayerConfiguration()) { layerRenderer in
+                // ★ 把 appState.headPoseTracker 传进去,StereoVideoRenderer
+                //   每帧渲染时把 deviceAnchor 推到这个共享 tracker,
+                //   LiveKitManager 的 pose 定时器从同一个 tracker 读 pose
+                //   发到 Data Channel。
                 let renderer = StereoVideoRenderer(
                     layerRenderer: layerRenderer,
-                    frameHandler: appState.videoFrameHandler
+                    frameHandler: appState.videoFrameHandler,
+                    headPoseTracker: appState.headPoseTracker
                 )
                 renderer.startRenderLoop()
             }

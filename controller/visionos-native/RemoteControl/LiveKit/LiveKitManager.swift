@@ -57,7 +57,11 @@ final class LiveKitManager {
 
     // MARK: - 依赖
     private let appState: AppState              // 全局状态（UI 绑定）
-    private let headTracker: HeadPoseTracker    // ARKit 头部追踪
+    // ★ headTracker 从 appState 拿,不再自己 new 一个。
+    //   原因:visionOS 一个进程只能有一个 WorldTrackingProvider。
+    //   现在 StereoVideoRenderer 是唯一运行 ARKit 的地方,
+    //   LiveKitManager 只从共享 tracker 读缓存的 pose。
+    private let headTracker: HeadPoseTracker
     private let room: Room                       // LiveKit Room 实例
 
     // MARK: - 内部状态
@@ -65,10 +69,16 @@ final class LiveKitManager {
     private var fpsTimer: Task<Void, Never>?    // 1Hz FPS 统计定时器
     private var isConnected = false              // 防止重复连接
 
+    // 诊断计数器:帮我们定位 pose 回传是否通
+    private var poseNilCount: Int = 0     // 连续多少帧 headTracker 没返回 pose
+    private var poseSentCount: Int = 0    // 成功 publish 的累计次数
+
     // MARK: - 初始化
     init(appState: AppState) {
         self.appState = appState
-        self.headTracker = HeadPoseTracker()
+        // ★ 从 AppState 拿共享 tracker(StereoVideoRenderer 每帧往里写)
+        //   之前是 `HeadPoseTracker()` 自己 new 一个,会导致两个 ARKitSession 冲突
+        self.headTracker = appState.headPoseTracker
 
         // 创建 Room，配置选项
         // Room 会自动管理 PeerConnection、ICE、DTLS/SRTP 协商
@@ -93,8 +103,11 @@ final class LiveKitManager {
         appState.connectionStatus = .connecting
         appState.errorMessage = nil
 
-        // 启动头部追踪（后台线程运行 ARKit session）
-        headTracker.start()
+        // ★ 不再启动 HeadPoseTracker 的 ARKit session ——
+        //   tracker 只是共享缓存,ARKit 由 StereoVideoRenderer 独占运行。
+        //   所以 pose 只有在用户"进入 Immersive Space"之后才会开始有数据。
+        //   在此之前 poseArrays() 返回 nil,sendPose() 会静默跳过(正确行为)。
+        headTracker.reset()   // 清掉可能的 stale pose 缓存
 
         // 异步连接到 LiveKit room
         Task {
@@ -139,26 +152,42 @@ final class LiveKitManager {
     }
 
     // MARK: - 断开连接
+    //
+    // ★ 改成 async —— 之前是"fire and forget"的 Task { room.disconnect() },
+    //   外层立刻继续执行。ContentView 在 disconnect 调用后立马把 liveKitManager
+    //   设为 nil,Room 对象被释放,但服务器端 vision-pro-receiver session 还没
+    //   清理,下次 Connect 时用同一 identity 会冲突/卡住。
+    //   现在把整个流程 await 干净,再返回,确保服务器端 session 彻底清理。
+    //
+    // 同时 Room 对象不再释放 —— LiveKit Room 支持 disconnect 后再次 connect,
+    // 复用同一个 Room 比每次新建更稳。
 
-    func disconnect() {
-        print("[LiveKit] 断开连接")
+    func disconnect() async {
+        print("[LiveKit] 断开连接 (awaiting)…")
 
-        // 停止所有定时器
+        // 停止所有定时器(取消 Task,不需要 await)
         stopPoseTimer()
         stopFPSTimer()
 
-        // 停止头部追踪
-        headTracker.stop()
+        // ★ tracker 不再自己 run ARKit,只清缓存
+        //   真正的 ARKit 生命周期跟着 ImmersiveSpace 走,
+        //   由 StereoVideoRenderer 负责。
+        headTracker.reset()
 
-        // 断开 Room（会自动清理 PeerConnection、取消所有订阅）
-        Task {
-            await room.disconnect()
-        }
+        // ★ 等 Room 真正断开(WebSocket 关闭、PeerConnection 清理)
+        await room.disconnect()
 
         // 重置状态
         isConnected = false
         appState.connectionStatus = .disconnected
         appState.isReceivingVideo = false
+        appState.errorMessage = nil
+
+        // 重置诊断计数器,下次连接时重新统计
+        poseNilCount  = 0
+        poseSentCount = 0
+
+        print("[LiveKit] ✓ 断开完成")
     }
 
     // MARK: - 检查已有轨道
@@ -242,9 +271,31 @@ final class LiveKitManager {
 
     /// 编码 head pose 为 JSON 并通过 Data Channel 发送
     /// 使用 unreliable 模式（UDP 语义）降低延迟
+    ///
+    /// ★ 本版本加了诊断日志,用于定位"sender 收不到 pose"的根因:
+    ///   1. poseArrays() 返回 nil 的频率 → 是否 headTracker 没拿到数据
+    ///      (典型原因:两个 ARKitSession 冲突,或 session 还没 ready)
+    ///   2. publish 是否抛异常 → 是否 Data Channel 有问题
+    ///   3. 成功次数 → 是否 SDK 静默丢包
     private func sendPose() {
-        // 从 HeadPoseTracker 获取当前 pose
-        guard let (position, quaternion) = headTracker.poseArrays() else { return }
+        // 从共享 HeadPoseTracker 获取当前 pose
+        // StereoVideoRenderer 每帧会往里写,所以只有用户进入 Immersive Space
+        // 后才会有数据。之前 nil 是正常的(还没进沉浸空间 → 不需要发 pose)。
+        guard let (position, quaternion) = headTracker.poseArrays() else {
+            // 每 90 次(约 3 秒)打印一次诊断
+            poseNilCount += 1
+            if poseNilCount == 1 || poseNilCount % 90 == 0 {
+                print("[Pose] tracker 还没数据 (#\(poseNilCount)) " +
+                      "—— 等待用户进入 Immersive Space")
+            }
+            return
+        }
+
+        // 有数据了 → 重置 nil 计数
+        if poseNilCount > 0 {
+            print("[Pose] ✓ tracker 首次返回数据(之前 nil \(poseNilCount) 次),开始发送")
+            poseNilCount = 0
+        }
 
         // 构造 JSON 消息
         let poseData = PoseData(
@@ -255,23 +306,37 @@ final class LiveKitManager {
         )
 
         // 编码为 JSON data
-        guard let jsonData = try? JSONEncoder().encode(poseData) else { return }
+        guard let jsonData = try? JSONEncoder().encode(poseData) else {
+            print("[Pose] ⚠ JSONEncoder encode failed")
+            return
+        }
 
         // 通过 LiveKit Data Channel 发送
         // reliable: false → 使用不可靠传输（类似 UDP），降低延迟
         // topic: "pose" → sender 端可按 topic 过滤
-        Task {
+        Task { [weak self] in
+            guard let self else { return }
             do {
-                try await room.localParticipant.publish(
+                try await self.room.localParticipant.publish(
                     data: jsonData,
                     options: DataPublishOptions(
                         topic: LiveKitConfig.poseTopic,
                         reliable: false
                     )
                 )
+                // ★ 诊断:publish 成功
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.poseSentCount += 1
+                    // 第 1 次 + 每 300 次(10秒)打一行
+                    if self.poseSentCount == 1 || self.poseSentCount % 300 == 0 {
+                        print("[Pose] ✓ sent #\(self.poseSentCount) " +
+                              "pos=[\(String(format: "%.3f,%.3f,%.3f", position[0], position[1], position[2]))]")
+                    }
+                }
             } catch {
-                // pose 发送失败不是致命错误，静默忽略
-                // （可能还没连上、或者短暂断连中）
+                // ★ 诊断:publish 抛异常,打出来(之前是静默吞掉的)
+                print("[Pose] ✗ publish error: \(error)")
             }
         }
     }

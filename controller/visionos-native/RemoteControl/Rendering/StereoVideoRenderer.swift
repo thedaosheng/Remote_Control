@@ -159,6 +159,10 @@ final class StereoVideoRenderer: @unchecked Sendable {
     // 但渲染线程必须能访问它,所以标 nonisolated(unsafe)
     private nonisolated(unsafe) let layerRenderer: LayerRenderer
     private let frameHandler:  VideoFrameHandler
+    // 共享的 head pose 缓存 —— 每帧把当前 deviceAnchor 推给它,
+    // LiveKitManager 的 pose 定时器从同一个实例读取 pose 发到 Data Channel。
+    // 这样避免"两个 ARKitSession 同时跑"导致的 worldTracking 饿死问题。
+    private let headPoseTracker: HeadPoseTracker
 
     // ---- Metal ----
     // 所有 nonisolated 的属性都用 nonisolated(unsafe),因为本类是 @unchecked Sendable
@@ -188,10 +192,16 @@ final class StereoVideoRenderer: @unchecked Sendable {
 
     // -------------------------------------------------------------------------
     // init —— 构建 Metal 资源、初始化 ARKit
+    //   headPoseTracker: 共享的 pose 缓存(AppState 里创建,LiveKitManager 也读它)
     // -------------------------------------------------------------------------
-    init(layerRenderer: LayerRenderer, frameHandler: VideoFrameHandler) {
-        self.layerRenderer = layerRenderer
-        self.frameHandler  = frameHandler
+    init(
+        layerRenderer: LayerRenderer,
+        frameHandler: VideoFrameHandler,
+        headPoseTracker: HeadPoseTracker
+    ) {
+        self.layerRenderer   = layerRenderer
+        self.frameHandler    = frameHandler
+        self.headPoseTracker = headPoseTracker
 
         // visionOS 26: LayerRenderer 自带 device,直接用避免多 device 不一致
         self.device = layerRenderer.device
@@ -369,6 +379,15 @@ final class StereoVideoRenderer: @unchecked Sendable {
         let anchor = arReady
             ? worldTracking.queryDeviceAnchor(atTimestamp: trackingTime)
             : nil
+
+        // ★ 把 deviceAnchor 的 4x4 变换推给共享 HeadPoseTracker,
+        //   LiveKitManager 的 pose 定时器会从同一个 tracker 读数据发到
+        //   LiveKit Data Channel。必须在这里做,因为 visionOS 一个进程
+        //   只能有一个 WorldTrackingProvider,之前 LiveKitManager 自己
+        //   run 一个会被这里的 session 饿死。
+        if let anchor {
+            headPoseTracker.updateFromTransform(anchor.originFromAnchorTransform)
+        }
 
         renderCount += 1
 

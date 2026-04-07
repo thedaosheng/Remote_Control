@@ -32,6 +32,12 @@ class AppState {
     // Shared objects — accessed across isolation boundaries with @unchecked Sendable
     nonisolated(unsafe) let videoFrameHandler = VideoFrameHandler()
 
+    // ★ 共享的 head pose 缓存 ——
+    //   只能有一个进程级实例,StereoVideoRenderer 写 / LiveKitManager 读。
+    //   不再像之前那样 LiveKitManager 自建一个 tracker + 自己跑 ARKit session
+    //   (那会和 StereoVideoRenderer 的 ARKit session 冲突,visionOS 限制)
+    nonisolated(unsafe) let headPoseTracker = HeadPoseTracker()
+
     enum ConnectionStatus: String {
         case disconnected = "Disconnected"
         case connecting   = "Connecting…"
