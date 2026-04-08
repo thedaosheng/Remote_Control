@@ -135,7 +135,116 @@ journalctl --user -u lk-s2 --no-pager -n 20 | grep "推帧"
 
 ### 留给下一个 Agent 的待办
 
-- [ ] 整套代码 ROS2 化改造 (用户已要求, 但本次会话没做)
-- [ ] VP pose 30Hz → 60/90Hz 测试 (改 LiveKitConfig.poseFrequency 一行常量)
+- [x] ✅ 整套代码 ROS2 化改造 (2026-04-08 完成, 详见下一节)
+- [ ] VP pose 30Hz → 60/90Hz 测试 (改 LiveKitConfig.poseFrequency 一行常量, 在 Mac VP 端 Swift 代码里)
 - [ ] sender 端是不是还有别的隐藏参数没设 (比如 jitter buffer, NACK)
 - [ ] 实测端到端 motion-to-photon 延迟 (用屏幕计时器拍照法)
+- [ ] 把 ROS 化代码跟真实 VP 一起做端到端验证 (我做完了 mock + 真机两种 e2e 测试,
+      但还没拿真实 VP 的 head pose 走全流程, 等用户配合)
+- [ ] 加 dm_motor_calibration_node (互动测物理范围的 ROS service 包装)
+      —— 当前的方案是 axis_verify 老脚本仍然可用,calibration_node 不是必需
+
+---
+
+## 2026-04-08 — ROS2 化改造 (完整 6 stage)
+
+### 这次会话做了什么
+
+按用户要求把整套 Linux 代码 ROS2 化改造, 目标:
+- 一行命令起整套 (`ros2 launch teleop_bringup full.launch.py`)
+- 一句话切调试参数 (`preset:=L5` / `mock_motor:=true` / `debug:=true`)
+- 运行时 dynamic param 改 KP/KD/preset 不重启
+- 老 scripts/ 完全不动作为 fallback
+
+### 创建的 4 个新 ROS2 package (在 device-a-linux/ros2_ws/src/)
+
+| Package | 类型 | 作用 |
+|---------|------|------|
+| `teleop_msgs` | ament_cmake | 自定义 msg/srv: HeadPose / SetPreset / RecalibrateAxis |
+| `teleop_livekit_bridge` | ament_python | LiveKit ↔ ROS2 桥, 包装老 sender + publish /vp/head_pose |
+| `teleop_dm_motor` | ament_python | 达妙双电机 ROS 控制 (核心), 含 200Hz 控制环 + 5 service + dynamic params + mock_mode |
+| `teleop_bringup` | ament_python | launch 总入口, 含 README + 3 个 launch 文件 |
+
+### 关键设计点
+
+- **sender_core.py**: 从老 sender 复制, 加一个 `ROS_POSE_CALLBACK` 全局 hook,
+  livekit_bridge_node 启动时注入 publish 函数, sender 收到 pose 时回调 publish 到 ROS topic
+- **mock_mode**: dm_motor_controller_node 加 `mock_mode` 参数,
+  没硬件时 `mock_motor:=true` 跳过串口/电机初始化, 控制循环空跑, 用于纯软件 e2e 测试
+- **preset 启动时显式应用**: launch 命令行 `preset:=L?` 触发 set_parameter 在 callback
+  注册之前, 所以 init 末尾要显式应用一次 startup_preset 才能让 kp/kd 生效
+- **200Hz 控制循环跑专用线程**: 跟 rclpy spin 隔离, 通过 lock 共享 vp_pose 缓存
+- **livekit_bridge 双线程**: rclpy spin 一个线程, sender_core asyncio + GLib 自己一个 event loop, 互不干扰
+
+### 启动命令速查
+
+```bash
+# 全套 (sender + 电机)
+ros2 launch teleop_bringup full.launch.py
+
+# 切档
+ros2 launch teleop_bringup full.launch.py preset:=L5
+
+# 没硬件 (mock 模式)
+ros2 launch teleop_bringup full.launch.py mock_motor:=true
+
+# 只电机
+ros2 launch teleop_bringup motor_only.launch.py preset:=L4
+
+# 只 sender (要先 systemctl --user stop lk-s2)
+ros2 launch teleop_bringup sender_only.launch.py
+
+# 调试模式 (rqt + rosbag)
+ros2 launch teleop_bringup full.launch.py debug:=true
+```
+
+### 运行时调参 (不重启)
+
+```bash
+ros2 param set /dm_motor_controller kp 30.0
+ros2 param set /dm_motor_controller preset L5    # 触发批量更新
+ros2 param set /dm_motor_controller sign_yaw -1  # 极性翻转
+
+ros2 service call /dm_motor/disable std_srvs/srv/Trigger
+ros2 service call /dm_motor/set_zero std_srvs/srv/Trigger
+```
+
+### 测试覆盖
+
+| Stage | 测试 | 结果 |
+|-------|------|------|
+| 1 骨架 | colcon build 4 包 + ros2 run 4 节点起来 | ✅ |
+| 2 livekit_bridge | stop lk-s2 + ros2 run + ros2 topic list 看 /vp/head_pose | ✅ |
+| 3 dm_motor (mock) | ros2 run + topic + service + dynamic param 切 preset L5 | ✅ |
+| 3 dm_motor (real) | 真实电机 PMAX 通讯 + ramp 到 0 + control loop 200Hz | ✅ |
+| 4 launch (mock) | motor_only mock_motor:=true preset:=L3 → kp 自动 20.0 | ✅ |
+| 4 launch (real, full) | full preset:=L5 → 2 节点同时起 + 4 topic + kp 30 kd 0.8 | ✅ |
+| 5 README | teleop_bringup/README.md 完整覆盖所有调试场景 | ✅ |
+
+### 遇到的坑 (后续 Agent 避雷)
+
+1. **colcon build 报 `ament_package not found`**: shell 环境问题, 在干净的 `bash -c 'source ... && colcon build ...'` 子 shell 里 build 才稳
+2. **`read_motor_param` 第一次返回 None**: SDK 异步刷新延迟, 必须重试 5 次每次 0.2s
+3. **preset 启动时不生效**: launch 命令行 `preset:=L3` 设的 ROS param 在 callback 注册之前已经发生, 所以 init 末尾要再显式 set_parameters 一次. 加了 `_handling_preset` flag 防止递归
+4. **`create_timer` 是周期 timer 不是 one-shot**: 之前用错了, 改成 `_handling_preset` flag
+5. **kill 节点后 zombie**: 测试时 SIGINT/timeout 杀进程, 残留 zombie 节点干扰 `ros2 node list`. 用 `pkill -9 -f dm_motor_controller_node` 清理
+6. **mock_mode 是必备**: 硬件不在线时 (24V 断了/CAN 松了), 没 mock_mode 节点完全起不来, 整个 e2e 测试做不下去
+
+### 没做的 (留给下一个 Agent)
+
+- **真实 VP 端到端测试**: 我做完了 mock + 真机本地测试, 但还没拿真实 VP head pose 跑全链路 (sender 收 VP → bridge publish → motor_controller 控制电机). 用户需要配合戴 VP 测一次
+- **dm_motor_calibration_node**: 互动校准 service 包装, 不是必需 (axis_verify 老脚本可以用)
+- **删除老脚本**: 用户说"老脚本完全不动" → scripts/ 一行不删
+
+### Linux 端关键文件路径补充 (ROS2 部分)
+
+| 用途 | 路径 |
+|------|------|
+| ROS2 工作空间 | `/home/rhz/teleop/ros2_ws/` |
+| 4 个 teleop_* package | `ros2_ws/src/teleop_msgs/`, `teleop_livekit_bridge/`, `teleop_dm_motor/`, `teleop_bringup/` |
+| dm_motor 配置 | `ros2_ws/src/teleop_dm_motor/config/dm_motor.yaml` (默认参数) |
+| dm_motor 档位 | `ros2_ws/src/teleop_dm_motor/config/dm_motor_presets.yaml` (L1-L5) |
+| dm_motor 校准 | `ros2_ws/src/teleop_dm_motor/config/dm_motor_calibration.yaml` (示例, 真实数据机器特定) |
+| launch 入口 | `ros2_ws/src/teleop_bringup/launch/full.launch.py` |
+| README | `ros2_ws/src/teleop_bringup/README.md` (所有调试命令) |
+| Vendored 达妙驱动 | `ros2_ws/src/teleop_dm_motor/teleop_dm_motor/lib/DM_CAN.py` |

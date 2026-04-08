@@ -1,0 +1,4 @@
+# 机器特定校准数据 (每台机器自己跑 axis_verify 生成, 不进 git)
+config/dm_motor_calibration.local.yaml
+__pycache__/
+*.pyc
