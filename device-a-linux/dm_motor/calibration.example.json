@@ -1,50 +1,57 @@
 {
-  "_README": [
-    "这是一个校准数据示例文件 (不要直接用!)",
+  "_README_zh": [
+    "这是一个 calibration.json 的示例文件 (不要直接用!)",
     "",
-    "实际的校准数据是机器特定的, 由 dm_motor_axis_verify.py 生成,",
-    "保存在 dm_motor/scripts/dm_motor_calibration.json (在 .gitignore 里).",
+    "实际的校准数据是机器特定的, 由 dm_motor_axis_verify.py 或者手动",
+    "互动测量生成, 保存在 dm_motor/scripts/dm_motor_calibration.json",
+    "(在 .gitignore 里, 不进 git)。",
     "",
-    "每台机器首次部署时:",
-    "  1. 跑 dm_motor_zero_calibration.py 设永久零点",
-    "  2. 跑 dm_motor_axis_verify.py 互动测两侧极值, 写入 calibration.json",
-    "  3. 之后所有 vp_control 会自动读这个 json",
+    "每台机器首次部署时的校准流程:",
+    "  1. 跑 dm_motor_zero_calibration.py — 把当前姿态写 Flash 当全局零点",
+    "  2. 跑 dm_motor_axis_verify.py — 互动测两侧机械极限",
+    "     (或者手动用一个 read 脚本, 让用户掰 4 次记 4 个值)",
+    "  3. 自动写 calibration.json (本文件的 schema)",
+    "  4. 之后 vp_control 会读 summary 里的 min/max 当软件硬限幅",
     "",
-    "json 字段说明:",
-    "  round1_long_pin / round2_short_pin: 两次互动测量的极值",
-    "    motor1_yaw_can01_deg: 电机1 (CAN 0x01, Yaw 轴) 在该侧极限时的位置 (度)",
-    "    motor2_pitch_can02_deg: 电机2 (CAN 0x02, Pitch 轴) 在该侧极限时的位置 (度)",
-    "  summary: 工作区汇总, vp_control 直接读这个",
-    "    min_deg / max_deg: 物理极限",
-    "    safety_margin_deg: 内缩安全余量 (默认 5°, vp_control 用 [min+5, max-5] 作为工作区)",
-    "    physical_mapping_note: 提醒物理映射 (写错了直接改 dm_motor_vp_control.py)"
+    "字段说明:",
+    "  raw_samples — 用户掰电机时记录的原始读数 (deg)",
+    "  summary    — vp_control 直接读这个",
+    "    min_deg/max_deg     — 工作区物理极限 (相对当前 Flash 零点)",
+    "    span_deg            — max - min",
+    "    center_deg          — 工作区中心 (理想是 0, 偏差越小说明零点设得越居中)",
+    "    safety_margin_deg   — 内缩余量 (vp_control 用 [min+5, max-5] 做硬限幅)",
+    "    physical_mapping_note — 提醒物理映射 (写错就改 dm_motor_vp_control.py 的 motor 创建顺序)",
+    "",
+    "★ 重要 — 关于映射基准:",
+    "  vp_control 当前默认行为是 'VP 中立 → 电机 Flash 零点 (0, 0)',",
+    "  不再用 workspace_center。所以 calibration.json 的 center_deg 字段",
+    "  仅作 '零点是否设得居中' 的参考, 不影响实际控制行为。",
+    "  如果 center 偏 0 较大, 建议重新跑 dm_motor_zero_calibration.py",
+    "  在物理中央位置重设零点, 这样 VP 中立时电机 = 零点 = 物理中央。"
   ],
-  "round1_long_pin": {
-    "timestamp": "2026-04-07T18:00:39",
-    "description": "示例: 长钉到位时的极值",
-    "motor1_yaw_can01_rad": 0.1787,
-    "motor1_yaw_can01_deg": 10.24,
-    "motor2_pitch_can02_rad": -0.8715,
-    "motor2_pitch_can02_deg": -49.93
-  },
-  "round2_short_pin": {
-    "timestamp": "2026-04-07T18:03:24",
-    "description": "示例: 短钉到位时的极值",
-    "motor1_yaw_can01_rad": -1.1355,
-    "motor1_yaw_can01_deg": -65.06,
-    "motor2_pitch_can02_rad": 0.5503,
-    "motor2_pitch_can02_deg": 31.53
+  "_example_data_note": "下面是 2026-04-07 一台真实机器的数据 (代码改造时参考)",
+  "comment_zh": "示例: Yaw 重设过零点(物理中央), Pitch 沿用最初零点 + 用户手动剪到 ±60 半幅",
+  "timestamp": "2026-04-07T20:00:00",
+  "raw_samples": {
+    "yaw_deg":   [26.02, -37.15],
+    "pitch_deg": [-89.47, 97.91]
   },
   "summary": {
     "motor1_yaw_can01": {
-      "min_deg": -65.06,
-      "max_deg": 10.24
+      "min_deg":    -37.15,
+      "max_deg":    26.02,
+      "span_deg":   63.17,
+      "center_deg": -5.56
     },
     "motor2_pitch_can02": {
-      "min_deg": -49.93,
-      "max_deg": 31.53
+      "min_deg":    -55.78,
+      "max_deg":    64.22,
+      "span_deg":   120.00,
+      "center_deg": 4.22,
+      "user_clipped_to_half_60_note": "用户手动剪到 ±60° 半幅 (保持中心 +4.22°), 物理可达跨度 187° 但软件限制只用其中 120°"
     },
     "safety_margin_deg": 5.0,
-    "physical_mapping_note": "电机1(0x01)=Yaw 左右转头  电机2(0x02)=Pitch 俯仰点头"
+    "physical_mapping_note": "电机1(0x01)=Yaw 左右转头  电机2(0x02)=Pitch 俯仰点头",
+    "zero_point_note": "Yaw 零点已重新校准 = 物理工作区中央; Pitch 零点沿用最初校准 (恰好接近物理中央, 中心偏差仅 +4.22°)"
   }
 }

@@ -224,8 +224,10 @@ def main():
     pitch_min = calib['summary']['motor2_pitch_can02']['min_deg'] + SAFETY_MARGIN_DEG
     pitch_max = calib['summary']['motor2_pitch_can02']['max_deg'] - SAFETY_MARGIN_DEG
 
-    yaw_center   = (yaw_min + yaw_max) / 2
-    pitch_center = (pitch_min + pitch_max) / 2
+    # 工作区物理中心 —— 仅作启动 banner 显示用,不再用作映射基准
+    # (映射改成 "VP 中立 → 电机零点 (0, 0)", 不是 workspace_center)
+    yaw_workspace_center   = (yaw_min + yaw_max) / 2
+    pitch_workspace_center = (pitch_min + pitch_max) / 2
     yaw_half     = (yaw_max - yaw_min) / 2
     pitch_half   = (pitch_max - pitch_min) / 2
 
@@ -235,8 +237,9 @@ def main():
     print("=" * 60)
     print(f"  VP → 达妙 实时控制   [档位: {preset_label}]")
     print("=" * 60)
-    print(f"  Yaw   工作区 [{yaw_min:+6.2f}°, {yaw_max:+6.2f}°]  中心 {yaw_center:+6.2f}°")
-    print(f"  Pitch 工作区 [{pitch_min:+6.2f}°, {pitch_max:+6.2f}°]  中心 {pitch_center:+6.2f}°")
+    print(f"  Yaw   工作区 [{yaw_min:+6.2f}°, {yaw_max:+6.2f}°]  物理中心 {yaw_workspace_center:+6.2f}° (仅参考)")
+    print(f"  Pitch 工作区 [{pitch_min:+6.2f}°, {pitch_max:+6.2f}°]  物理中心 {pitch_workspace_center:+6.2f}° (仅参考)")
+    print(f"  ★ 映射基准: 电机零点 (0°, 0°)  —  VP 中立 → 电机停在零点")
     print(f"  Yaw   sign={args.sign_yaw:+d}  scale={args.scale_yaw}")
     print(f"  Pitch sign={args.sign_pitch:+d}  scale={args.scale_pitch}")
     print(f"  MIT KP={KP}  KD={KD}  rate-limit={args.rate_limit:.0f}°/s")
@@ -283,7 +286,8 @@ def main():
     cur_y = float(m_yaw.getPosition())
     cur_p = float(m_pitch.getPosition())
     print(f"\n  当前位置: Yaw {math.degrees(cur_y):+.2f}°  Pitch {math.degrees(cur_p):+.2f}°")
-    print(f"  → ramp 到中心 [Yaw {yaw_center:+.2f}°, Pitch {pitch_center:+.2f}°]\n")
+    print(f"  → ramp 到 ★全局零点★ [Yaw 0°, Pitch 0°]")
+    print(f"    (vp 中立 = 电机 Flash 零点, 不再用 workspace_center)\n")
 
     # ----- 安全退出 -----
     running = [True]
@@ -294,30 +298,34 @@ def main():
     signal.signal(signal.SIGTERM, on_sig)
 
     try:
-        # ----- Step 1: 从当前位置 cosine ramp 到中心 -----
+        # ----- Step 1: 从当前位置 cosine ramp 到 ★全局零点★ (0, 0) -----
+        # ★ 注意 ramp 期间不应用 hard clamp,因为电机起点可能在工作区外
+        # (比如 Pitch 当前 +97°, 工作区内 max +64°). 突然 clamp 会让目标
+        # 第一帧从 +97° 跳到 +64°, 电机猛抽。让 ramp 自然走从起点到 0°。
         ramp_steps = int(RAMP_TO_CENTER_SECS * CTRL_FREQ)
-        yc_rad = math.radians(yaw_center)
-        pc_rad = math.radians(pitch_center)
         for i in range(ramp_steps):
             if not running[0]: break
             ratio  = (i + 1) / ramp_steps
             smooth = 0.5 - 0.5 * math.cos(math.pi * ratio)
-            ty = cur_y + (yc_rad - cur_y) * smooth
-            tp = cur_p + (pc_rad - cur_p) * smooth
-            mc.controlMIT(m_yaw,   KP, KD, clamp(ty, yaw_hard_lo, yaw_hard_hi), 0, 0)
-            mc.controlMIT(m_pitch, KP, KD, clamp(tp, pit_hard_lo, pit_hard_hi), 0, 0)
+            # 从当前位置 ramp 到 0 (而不是 workspace_center)
+            ty = cur_y + (0.0 - cur_y) * smooth
+            tp = cur_p + (0.0 - cur_p) * smooth
+            mc.controlMIT(m_yaw,   KP, KD, ty, 0, 0)
+            mc.controlMIT(m_pitch, KP, KD, tp, 0, 0)
             time.sleep(DT)
 
-        # 主循环初始 prev = 当前 (中心)
-        prev_y = yc_rad
-        prev_p = pc_rad
+        # 主循环初始 prev = 0 (零点)
+        prev_y = 0.0
+        prev_p = 0.0
         last_print = time.time()
 
         # 主循环开始时间, 用于 vp 输入淡入
         main_loop_t0 = time.time()
 
-        print("  ✓ 已到中心, 开始监听 VP pose ...")
+        print("  ✓ 已到全局零点 (0, 0), 开始监听 VP pose ...")
         print(f"  ★ 前 {TAKEOVER_FADE_SECS}s 淡入: vp 输入缩放从 0 → 1, 平滑接管")
+        print(f"  ★ 工作区软限幅: Yaw [{yaw_min:+.1f},{yaw_max:+.1f}]  "
+              f"Pitch [{pitch_min:+.1f},{pitch_max:+.1f}]")
         print("  状态监测每 2 秒打印一行: VP 输入 | 目标 | 实际\n")
 
         # ----- Step 2: 主控制循环 (200Hz) -----
@@ -338,20 +346,20 @@ def main():
 
             # 计算目标位置 + 目标速度前馈
             if age > DATA_TIMEOUT_SECS:
-                # 没数据 → 保持中心, 速度前馈也归 0
-                target_y_rad = yc_rad
-                target_p_rad = pc_rad
+                # 没数据 → 保持 ★全局零点★ (不再是 workspace_center)
+                target_y_rad = 0.0
+                target_p_rad = 0.0
                 ff_y_rad_per_sec = 0.0
                 ff_p_rad_per_sec = 0.0
                 state_label = f"NO DATA({age:4.1f}s)" if age != float('inf') else "WAIT     "
             else:
                 # ----- 位置目标 -----
-                # vp_*_deg 是相对头部初始姿态的角度 (度)
-                # fade × scale × sign × vp_deg 是从中心的偏移量 (度)
-                offset_y_deg = args.sign_yaw   * args.scale_yaw   * fade * vp_y
-                offset_p_deg = args.sign_pitch * args.scale_pitch * fade * vp_p
-                target_y_deg = yaw_center   + offset_y_deg
-                target_p_deg = pitch_center + offset_p_deg
+                # vp_*_deg 是相对头部初始姿态(VP 进 Immersive 那一刻)的角度(度)
+                # ★ VP 中立 → 电机零点 (0, 0), 不再用 workspace_center
+                # 公式: target = sign × scale × fade × vp_deg
+                target_y_deg = args.sign_yaw   * args.scale_yaw   * fade * vp_y
+                target_p_deg = args.sign_pitch * args.scale_pitch * fade * vp_p
+                # 软限幅: 还是要防止 vp 输入超出工作区物理极限
                 target_y_deg = max(yaw_min,   min(yaw_max,   target_y_deg))
                 target_p_deg = max(pitch_min, min(pitch_max, target_p_deg))
                 target_y_rad = math.radians(target_y_deg)
@@ -418,8 +426,8 @@ def main():
         import traceback; traceback.print_exc()
 
     finally:
-        # ----- 安全收尾: 缓慢归零 + 失能 -----
-        print("\n  [收尾] 缓慢回到中心...")
+        # ----- 安全收尾: 缓慢回到全局零点 (0, 0) + 失能 -----
+        print("\n  [收尾] 缓慢回到全局零点 (0, 0)...")
         try:
             for _ in range(3):
                 mc.refresh_motor_status(m_yaw)
@@ -427,21 +435,20 @@ def main():
                 time.sleep(0.05)
             ey = float(m_yaw.getPosition())
             ep = float(m_pitch.getPosition())
-            yc_rad = math.radians(yaw_center)
-            pc_rad = math.radians(pitch_center)
             steps = int(2.0 * CTRL_FREQ)
             for i in range(steps):
                 ratio = (i + 1) / steps
                 smooth = 0.5 - 0.5 * math.cos(math.pi * ratio)
-                ty = ey + (yc_rad - ey) * smooth
-                tp = ep + (pc_rad - ep) * smooth
+                # 从当前位置 ramp 到 0 (而不是 workspace_center)
+                ty = ey + (0.0 - ey) * smooth
+                tp = ep + (0.0 - ep) * smooth
                 mc.controlMIT(m_yaw,   KP, KD, ty, 0, 0)
                 mc.controlMIT(m_pitch, KP, KD, tp, 0, 0)
                 time.sleep(DT)
-            # 在中心 hold 0.5 秒
+            # 在 (0, 0) hold 0.5 秒
             for _ in range(int(0.5 * CTRL_FREQ)):
-                mc.controlMIT(m_yaw,   KP, KD, yc_rad, 0, 0)
-                mc.controlMIT(m_pitch, KP, KD, pc_rad, 0, 0)
+                mc.controlMIT(m_yaw,   KP, KD, 0.0, 0, 0)
+                mc.controlMIT(m_pitch, KP, KD, 0.0, 0, 0)
                 time.sleep(DT)
         except Exception:
             pass
