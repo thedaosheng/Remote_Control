@@ -1,6 +1,7 @@
-# Remote Control — Vision Pro 远程图传遥操作系统
+# Remote Control — 全链路远程遥操作系统
 
-跨公网双向 WebRTC 立体视频传输 + 头部姿态回传系统。
+Vision Pro 头显遥操作 → 云端 LiveKit 双向通信 → Linux 工控机 → 达妙电机/机械臂控制。
+含完整 MuJoCo 仿真环境（舵轮底盘 + 升降 + 双臂 + 云台）和 3D Systems Touch 力反馈笔集成。
 
 ```
 ┌─────────────────┐    ┌────────────────┐    ┌──────────────────┐
@@ -108,3 +109,112 @@ tun:
 | 帧率 | 60 fps |
 | 编码 | H264 @ NVENC |
 | 端到端延迟 | ~50-100ms |
+
+---
+
+## 项目全景地图（给后续 Agent 看）
+
+```
+teleop/
+├── device-a-linux/          ← Linux 工控机端（Agent 1 主战场）
+│   ├── zedmini_livekit_sender.py   ← ZED Mini → LiveKit 推流
+│   ├── dm_motor/                    ← 达妙电机控制（DM_CAN 驱动 + 标定 + VP 遥控）
+│   │   ├── scripts/dm_motor_vp_control.py  ← VP Pose → 电机角度映射
+│   │   └── DM_Control_Python/              ← 达妙官方 SDK
+│   ├── ros2_ws/src/                 ← ROS2 化改造（4 个 package）
+│   │   ├── teleop_bringup/         ← 一键启动 launch
+│   │   ├── teleop_dm_motor/        ← DM 电机 ROS2 节点
+│   │   ├── teleop_livekit_bridge/  ← LiveKit→ROS2 话题桥
+│   │   └── teleop_msgs/            ← 自定义消息（HeadPose 等）
+│   ├── setup_linux.sh              ← 一键安装脚本
+│   └── EXPERIMENTAL_VALIDATION_2026-04-08.md  ← 真机验证记录
+│
+├── cloud/                   ← 阿里云 LiveKit Server (39.102.113.104)
+│   └── livekit.yaml
+│
+├── controller/              ← Apple Vision Pro 端
+│   └── visionos-native/RemoteControl/
+│       ├── LiveKit/         ← LiveKit 接收 + 管理
+│       ├── Rendering/       ← CompositorServices 立体渲染 + Metal shader
+│       └── Tracking/        ← 头部姿态追踪回传
+│
+├── scripts/                 ← 实验脚本合集（按日期命名）
+│   ├── 20260408-cc-swerve_chassis.xml          ← ★ MuJoCo 完整场景（底盘+升降+双臂+云台）
+│   ├── 20260408-cc-swerve_keyboard_control.py  ← ★ 键盘控制主脚本
+│   ├── 20260408-cc-swerve_auto_test.py         ← 自动测试（无需键盘）
+│   ├── 20260408-cc-NEXT_SESSION_PLAN.md        ← ★ MuJoCo 下一步规划（Touch 笔遥控右臂）
+│   ├── 20260408-cc-run_full.sh                 ← 全套启动脚本
+│   ├── 20260407-cc-dm_motor_*.py               ← 达妙电机独立脚本
+│   ├── meshes/airbot/                          ← 机械臂 STL 网格（11 个）
+│   └── meshes/parts/                           ← 零件 stl 网格（3 个）
+│
+├── ros2_ws/src/             ← 本地 ROS2 工作空间（可视化验证用）
+│   ├── airbot_description/  ← URDF/xacro + mesh + RViz2 launch
+│   ├── airbot_control/      ← 关节控制节点
+│   ├── airbot_bringup/      ← 系统启动
+│   └── airbot_msgs/         ← 自定义消息
+│
+├── force-feedback-pen/      ← 3D Systems Touch 力反馈笔
+│   ├── 20260328-cc-airbot_force_sim.py    ← ★ Touch 笔 + MuJoCo 机械臂遥控（参考实现）
+│   ├── 20260328-cc-haptic_driver.py       ← Touch 笔底层串口驱动
+│   └── 20260328-cc-touch_serial_driver.py ← A5 5A 协议实现
+│
+├── Cangjie-Embodied/        ← 系统拓扑文档
+├── HZY/                     ← 零件加工图纸
+├── CLAUDE.md                ← 项目工作日志（ROS2 搭建全记录）
+└── HANDOFF_PROMPT.md        ← VP 渲染问题交接文档（已修复）
+```
+
+## MuJoCo 仿真环境（Agent 2 成果）
+
+### 已完成（2026-04-08）
+完整的移动操作平台仿真，28 个关节、24 个执行器：
+
+| 模块 | 关节 | 说明 |
+|------|------|------|
+| 四舵轮底盘 | 8（4转向+4驱动） | 全向移动，逆运动学+最短转向优化 |
+| 升降机构 | 1 prismatic | G/H 键控制，行程 0~0.5m |
+| 双臂 6DOF×2 | 12 revolute | airbot_play_force 带 G2 夹爪 mesh |
+| 两轴云台 | 2 hinge + 1 slide | head_yaw + head_pitch + 伸缩 |
+| 交互物体 | 3 free joint | 锅/盖/管（抓取测试用） |
+| 底盘根 | 1 free joint | 物理驱动 |
+
+### 运行方式
+```bash
+conda activate disc
+cd /home/rhz/teleop/scripts
+python 20260408-cc-swerve_keyboard_control.py
+# 键盘 WASD=平移, QE=旋转, GH=升降, R=重置, ESC=退出
+# ⚠️ 焦点放在终端窗口，不要点 MuJoCo 窗口
+```
+
+### 下一步任务（优先级排序）
+详见 `scripts/20260408-cc-NEXT_SESSION_PLAN.md`：
+1. ~~升降机构~~ ✅ 已完成
+2. ~~双臂集成~~ ✅ 已完成
+3. **Touch 力反馈笔遥控右臂** ← 下一个任务
+   - 参考实现：`force-feedback-pen/20260328-cc-airbot_force_sim.py`
+   - 核心：Touch 笔位姿增量 → MuJoCo IK → 右臂 6 关节角
+
+## 真机硬件（Agent 1 成果）
+
+### 已完成（2026-04-07 ~ 04-08）
+- Linux → LiveKit → VP 端到端视频传输 ✅
+- VP CompositorServices 立体渲染 ✅（修了 5 个串联 bug）
+- VP 头部姿态回传 → 达妙电机 2 轴云台控制 ✅
+- 完整 ROS2 化改造（4 个 package，一行命令起全套）✅
+- 端到端真机验证 ground truth ✅
+
+### 遗留问题
+- VP 沉浸模式渲染偶尔需要重启 app 才能正常显示
+- PREEMPT_RT 实时内核未配置（controller_manager 无法设置 FIFO 调度）
+
+## 环境说明
+
+| 环境 | Python | 用途 |
+|------|--------|------|
+| `/usr/bin/python3` | 3.10 系统 | ROS2、GStreamer、LiveKit（**不能用 conda**） |
+| `conda activate disc` | 3.10 miniconda | MuJoCo 3.4.0、pynput（**不能用系统 python**） |
+| ROS2 | Humble | `source /opt/ros/humble/setup.bash && source install/setup.bash` |
+
+⚠️ **miniconda 污染问题**：`ros2` 命令需要走 `~/bin/ros2` wrapper 才能用系统 Python。
