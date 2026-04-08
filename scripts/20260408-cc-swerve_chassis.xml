@@ -120,10 +120,11 @@
     -->
     <body name="table" pos="0.75 0 0">
       <!-- 桌面（condim=6 + 硬接触参数，确保刚性碰撞）-->
+      <!-- 桌面：超硬接触参数，防止高刚度阻抗控制器推穿 -->
       <geom name="table_top" type="box" size="0.6 0.4 0.025"
             pos="0 0 0.625" rgba="0.72 0.52 0.35 1"
-            friction="1.0 0.01 0.001"
-            condim="6" solref="0.001 1" solimp="0.95 0.99 0.001"
+            friction="1.5 0.02 0.001"
+            condim="6" solref="0.0005 1" solimp="0.99 0.999 0.0001"
             contype="1" conaffinity="1"/>
       <!-- 四根桌腿（加碰撞属性）-->
       <geom name="leg_fl" type="box" size="0.025 0.025 0.30"
@@ -231,8 +232,9 @@
         初始位置：torso 底部贴在 chassis 顶部 (z=0.04 相对底盘中心)
       -->
       <body name="torso_link" pos="0 0 0.04">
+        <!-- 升降关节：适度阻尼，防振荡但保证响应速度 -->
         <joint name="lift_joint" type="slide" axis="0 0 1" range="0 0.8"
-               damping="8" frictionloss="0.5"/>
+               damping="20" frictionloss="1.5"/>
         <inertial pos="0 0 0.20" mass="8.0" diaginertia="0.8 0.8 0.4"/>
 
         <!-- 蓝色躯干长方体 (25cm × 25cm × 40cm, 降低高度使双臂接近桌面) -->
@@ -502,8 +504,9 @@
     <velocity class="drive" name="rr_drive_act" joint="rr_drive"/>
 
     <!-- 升降位置控制 (目标高度 m)，索引 8 -->
-    <position name="lift_act" joint="lift_joint" kp="3000" kv="80"
-              forcerange="-800 800" ctrlrange="0 0.8"/>
+    <!-- 升降：高 kp 减少稳态误差 + 高阻尼防振荡 -->
+    <position name="lift_act" joint="lift_joint" kp="5000" kv="350"
+              forcerange="-1000 1000" ctrlrange="0 0.8"/>
 
     <!-- 左臂 6 关节 (索引 9~14) -->
     <position class="arm_joint" name="left_j1_act" joint="left_joint1"/>
