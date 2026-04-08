@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
 """
-四舵轮全向底盘 — MuJoCo 键盘控制 Demo (pynput 版)
+四舵轮全向底盘 — MuJoCo 键盘 + Touch 笔遥操作
 
-关键改进：
-  使用 pynput 监听全局键盘事件，能正确捕获"按下/松开"，
-  支持持续按住产生连续运动。这绕开了 mujoco viewer 的 key_callback
-  只在按下瞬间触发的限制。
+改进记录 (2026-04-08 夜间修复):
+  1. 碰撞系统全面修复 — 地板/桌面/机械臂链路都参与碰撞
+  2. 右臂改为力矩控制 + 任务空间阻抗控制 (对齐 airbot_force_sim.py)
+  3. 力反馈：cfrc_ext → 低通滤波 → 坐标变换 → Touch 笔输出
+  4. 夹爪：Button1 灰色按钮 toggle 开/合
+  5. Reset 用 settle 方式避免物体飞走
+  6. 升降行程扩大到 0~0.8m，速度加快
+  7. 键盘响应改为直接赋值（无渐变延迟）
 
-控制按键:
-  W / S : 前进 / 后退 (vx)
-  A / D : 左移 / 右移 (vy)
-  Q / E : 左转 / 右转 (omega)
-  R     : 重置位置和速度
-  ESC   : 退出
+控制按键 (按住生效):
+  底盘:   W/S 前后    A/D 左右    Q/E 转向
+  升降:   G/H 升/降
+  云台:   I/K 俯仰    J/L 偏航    T/Y 高度上下
+  Touch:  Button2 白色 = 零点校准 + 跟随启动
+          Button1 灰色 = 夹爪开/合
+  其他:   R 重置      ESC 退出
 
-所有按键都是"按住生效，松开衰减"。可以同时按多个键合成运动。
-
-注意：
-  - 必须聚焦 MuJoCo 窗口才能接收键盘事件（pynput 监听全局键盘，
-    但只有当 MuJoCo 窗口在前台时才不会和 viewer 内置快捷键冲突）
-  - 为避免和 viewer 内置快捷键冲突（C/T/F 等），WASD/QE 不会被
-    viewer 自带功能拦截
-
-运行：
+运行:
   conda activate disc
   python 20260408-cc-swerve_keyboard_control.py
+  # 禁用 Touch 笔: ENABLE_TOUCH=0 python ...
 """
 
 import os
@@ -57,9 +55,9 @@ ENABLE_TOUCH = os.environ.get('ENABLE_TOUCH', '1') == '1'
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MJCF_PATH = os.path.join(SCRIPT_DIR, "20260408-cc-swerve_chassis.xml")
 
-WHEEL_RADIUS = 0.06  # m, 与 MJCF 中 cylinder size 一致
+WHEEL_RADIUS = 0.06  # m
 
-# 轮子在底盘坐标系下的位置 (与 MJCF 中 fl/fr/rl/rr_steer_link 的 pos 一致)
+# 轮子在底盘坐标系下的位置
 WHEEL_POSITIONS = np.array([
     [ 0.16,  0.15],  # fl
     [ 0.16, -0.15],  # fr
@@ -67,25 +65,23 @@ WHEEL_POSITIONS = np.array([
     [-0.16, -0.15],  # rr
 ])
 
-# 速度上限
+# 底盘速度上限
 MAX_VX = 1.0       # m/s
 MAX_VY = 1.0       # m/s
 MAX_OMEGA = 2.0    # rad/s
 
-# 升降参数
-LIFT_MIN = 0.0     # m
-LIFT_MAX = 0.5     # m
-LIFT_INIT = 0.0    # 初始高度
-LIFT_RATE = 0.60   # m/s 升降速度（按键立即响应，快 3 倍）
+# 升降参数（扩大行程 + 加快速度）
+LIFT_MIN = 0.0
+LIFT_MAX = 0.8     # 从 0.5 扩大到 0.8
+LIFT_INIT = 0.0
+LIFT_RATE = 1.0    # m/s 升降速度（从 0.6 提升到 1.0）
 
 # 云台参数
 HEAD_YAW_MIN = -1.5708
 HEAD_YAW_MAX =  1.5708
 HEAD_PITCH_MIN = -0.7854
 HEAD_PITCH_MAX =  0.7854
-HEAD_RATE = 2.5   # rad/s 云台转速
-
-# 云台高度（立柱伸缩）
+HEAD_RATE = 2.5    # rad/s
 HEAD_STEM_MIN = -0.05
 HEAD_STEM_MAX =  0.40
 HEAD_STEM_RATE = 0.30  # m/s
@@ -94,46 +90,53 @@ HEAD_STEM_RATE = 0.30  # m/s
 ARM_HOME_LEFT  = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 ARM_HOME_RIGHT = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# Touch 笔 → 右臂映射参数（对齐 airbot_force_sim.py）
-PEN_POS_SCALE = 0.002   # m / mm  (1mm 笔位移 → 2mm 机械臂位移)
-PEN_ROT_SCALE = 1.0     # 姿态放大倍率 1:1
-IK_DAMPING = 0.1        # 差分 IK 阻尼系数
-IK_MAX_DELTA = 0.008    # 单步最大关节变化 (rad) - 慢一点避免反作用力推底盘
-IK_POS_WEIGHT = 1.0
-IK_ROT_WEIGHT = 0.25    # 姿态跟随权重
+# ============== 阻抗控制参数（对齐 airbot_force_sim.py）==============
+# 位置刚度/阻尼 (对角阵)
+KP_POS = np.diag([600.0, 600.0, 600.0])   # N/m
+KD_POS = np.diag([40.0, 40.0, 40.0])      # Ns/m
 
-# R_map: 笔坐标系 → 机器人 world 坐标系的旋转映射
-# 用户面向机器人坐：
-#   Touch X (用户右)   → Robot -Y  (机器人左为正 Y)
-#   Touch Y (上)       → Robot  Z  (上)
-#   Touch Z (朝用户)   → Robot -X  (机器人后)
-# 即：笔向前推 (-Z) → 机器人向前 (+X)
+# 姿态刚度/阻尼
+KP_ROT = np.diag([30.0, 30.0, 30.0])      # Nm/rad
+KD_ROT = np.diag([3.0, 3.0, 3.0])         # Nms/rad
+
+# 零空间阻尼（防止冗余自由度漂移）
+NULL_SPACE_DAMPING = 5.0
+
+# Touch 笔 → 右臂映射
+PEN_POS_SCALE = 0.002   # m / mm
+PEN_ROT_SCALE = 1.0     # 姿态 1:1
+
+# R_map: 笔坐标系 → 机器人 world 坐标系
 R_MAP = np.array([
-    [ 0,  0, -1],
-    [-1,  0,  0],
-    [ 0,  1,  0],
+    [ 0,  0, -1],   # Robot X ← Touch -Z (笔向前推 → 机器人前进)
+    [-1,  0,  0],   # Robot Y ← Touch -X (笔向右 → 机器人左)
+    [ 0,  1,  0],   # Robot Z ← Touch Y  (笔向上 → 机器人上)
 ], dtype=float)
 
-# 加速 / 衰减率（每秒）- 响应快得多
-ACCEL_V = 6.0         # m/s² 平移加速度（按键立即达到大部分速度）
-ACCEL_OMEGA = 10.0    # rad/s² 旋转加速度
-DECEL_V = 8.0         # m/s² 平移衰减（松开快速停下）
-DECEL_OMEGA = 12.0    # rad/s² 旋转衰减
+# 力反馈参数
+FORCE_SCALE = 0.02      # N/N (仿真力 → 笔力)
+MAX_PEN_FORCE = 3.0     # N (Touch 笔安全上限)
+FORCE_FILTER_ALPHA = 0.3  # 低通滤波系数 (0~1, 越小越平滑)
+
+# 夹爪参数
+GRIPPER_OPEN = 0.0366   # 全开位置
+GRIPPER_CLOSE = 0.0     # 全闭位置
+
+# 底盘速度（改为直接赋值，无渐变延迟）
+CHASSIS_SPEED = 0.6     # m/s 按键时直接达到的速度
+CHASSIS_OMEGA = 1.5     # rad/s
+DECEL_RATE = 10.0       # 松开后衰减率
 
 
-# ============== 全局按键状态（线程共享）==============
-# 启动时禁用 X11 keyboard auto-repeat (xset -r)，
-# 这样 press/release 事件就是真实的按下/松开，可以直接用布尔状态。
-# 退出时通过 atexit 恢复 (xset r on)。
-
+# ============== 全局按键状态 ==============
 key_held = {
-    'w': False, 's': False,   # 底盘前后
-    'a': False, 'd': False,   # 底盘左右
-    'q': False, 'e': False,   # 底盘转向
-    'g': False, 'h': False,   # 升降
-    'i': False, 'k': False,   # 云台俯仰
-    'j': False, 'l': False,   # 云台偏航
-    't': False, 'y': False,   # 云台高度 上/下
+    'w': False, 's': False,
+    'a': False, 'd': False,
+    'q': False, 'e': False,
+    'g': False, 'h': False,
+    'i': False, 'k': False,
+    'j': False, 'l': False,
+    't': False, 'y': False,
 }
 reset_request = False
 exit_request = False
@@ -141,13 +144,12 @@ state_lock = threading.Lock()
 
 
 def is_key_held(ch):
-    """判断某个按键当前是否按住中"""
     with state_lock:
         return key_held.get(ch, False)
 
 
 def disable_x11_repeat():
-    """禁用 X11 键盘自动重复（仅当前 X session）"""
+    """禁用 X11 键盘自动重复"""
     try:
         subprocess.run(['xset', '-r'], check=False, timeout=2,
                        env={**os.environ, 'DISPLAY': ':0'})
@@ -166,20 +168,16 @@ def restore_x11_repeat():
         pass
 
 
-# 注册退出钩子，保证 X11 状态被恢复
 atexit.register(restore_x11_repeat)
 
 
 # ============== pynput 回调 ==============
-
 def on_key_press(key):
-    """按键按下：标记 True"""
     global reset_request, exit_request
     try:
         ch = key.char.lower() if hasattr(key, 'char') and key.char else ''
     except AttributeError:
         ch = ''
-
     with state_lock:
         if ch in key_held:
             key_held[ch] = True
@@ -191,119 +189,85 @@ def on_key_press(key):
 
 
 def on_key_release(key):
-    """按键松开：标记 False（X11 auto-repeat 已禁用，事件可信）"""
     try:
         ch = key.char.lower() if hasattr(key, 'char') and key.char else ''
     except AttributeError:
         ch = ''
-
     with state_lock:
         if ch in key_held:
             key_held[ch] = False
 
 
-# ============== 速度更新 ==============
-
-# 当前底盘目标速度
+# ============== 速度更新（直接赋值，无渐变）==============
 target_vx = 0.0
 target_vy = 0.0
 target_omega = 0.0
-
-# 当前升降目标高度
 target_lift = LIFT_INIT
-
-# 云台目标角
 target_head_yaw = 0.0
 target_head_pitch = 0.0
-target_head_stem = 0.0  # 云台立柱高度
+target_head_stem = 0.0
 
 
 def update_target_velocity(dt):
-    """根据按键状态实时更新目标速度和升降高度
-
-    底盘速度: 按住对应键加速，松开衰减回零
-    升降高度: 按住 G 上升，按住 H 下降，否则保持当前高度
-
-    按键状态用 is_key_held() 判断（X11 auto-repeat 已禁用）
-    """
+    """按键状态 → 目标速度。按下立即达到目标速度，松开快速衰减。"""
     global target_vx, target_vy, target_omega, target_lift
     global target_head_yaw, target_head_pitch, target_head_stem
 
-    w = is_key_held('w')
-    s = is_key_held('s')
-    a = is_key_held('a')
-    d = is_key_held('d')
-    q = is_key_held('q')
-    e = is_key_held('e')
-    g = is_key_held('g')
-    h = is_key_held('h')
-    i = is_key_held('i')
-    k = is_key_held('k')
-    j = is_key_held('j')
-    l = is_key_held('l')
-    t_up = is_key_held('t')
-    y_dn = is_key_held('y')
+    # 底盘：按下直接赋值，松开衰减
+    w, s = is_key_held('w'), is_key_held('s')
+    a, d = is_key_held('a'), is_key_held('d')
+    q, e = is_key_held('q'), is_key_held('e')
 
-    accel_v = ACCEL_V * dt
-    accel_om = ACCEL_OMEGA * dt
-    decel_v = DECEL_V * dt
-    decel_om = DECEL_OMEGA * dt
-
-    # vx: W=正, S=负
     if w and not s:
-        target_vx = min(target_vx + accel_v, MAX_VX)
+        target_vx = CHASSIS_SPEED
     elif s and not w:
-        target_vx = max(target_vx - accel_v, -MAX_VX)
+        target_vx = -CHASSIS_SPEED
     else:
-        # 没按或两个都按 → 衰减
-        if abs(target_vx) < decel_v:
+        target_vx = target_vx * max(0.0, 1.0 - DECEL_RATE * dt)
+        if abs(target_vx) < 0.01:
             target_vx = 0.0
-        else:
-            target_vx -= math.copysign(decel_v, target_vx)
 
-    # vy: A=正(左), D=负(右)
     if a and not d:
-        target_vy = min(target_vy + accel_v, MAX_VY)
+        target_vy = CHASSIS_SPEED
     elif d and not a:
-        target_vy = max(target_vy - accel_v, -MAX_VY)
+        target_vy = -CHASSIS_SPEED
     else:
-        if abs(target_vy) < decel_v:
+        target_vy = target_vy * max(0.0, 1.0 - DECEL_RATE * dt)
+        if abs(target_vy) < 0.01:
             target_vy = 0.0
-        else:
-            target_vy -= math.copysign(decel_v, target_vy)
 
-    # omega: Q=正(左转), E=负(右转)
     if q and not e:
-        target_omega = min(target_omega + accel_om, MAX_OMEGA)
+        target_omega = CHASSIS_OMEGA
     elif e and not q:
-        target_omega = max(target_omega - accel_om, -MAX_OMEGA)
+        target_omega = -CHASSIS_OMEGA
     else:
-        if abs(target_omega) < decel_om:
+        target_omega = target_omega * max(0.0, 1.0 - DECEL_RATE * dt)
+        if abs(target_omega) < 0.01:
             target_omega = 0.0
-        else:
-            target_omega -= math.copysign(decel_om, target_omega)
 
-    # === 升降：G=上升, H=下降，松开则保持当前高度 ===
-    lift_step = LIFT_RATE * dt
+    # 升降
+    g, h = is_key_held('g'), is_key_held('h')
     if g and not h:
-        target_lift = min(target_lift + lift_step, LIFT_MAX)
+        target_lift = min(target_lift + LIFT_RATE * dt, LIFT_MAX)
     elif h and not g:
-        target_lift = max(target_lift - lift_step, LIFT_MIN)
+        target_lift = max(target_lift - LIFT_RATE * dt, LIFT_MIN)
 
-    # === 云台 ===
+    # 云台
     head_step = HEAD_RATE * dt
-    # I/K = pitch 上/下
-    if i and not k:
+    ii, kk = is_key_held('i'), is_key_held('k')
+    jj, ll = is_key_held('j'), is_key_held('l')
+    t_up, y_dn = is_key_held('t'), is_key_held('y')
+
+    if ii and not kk:
         target_head_pitch = max(target_head_pitch - head_step, HEAD_PITCH_MIN)
-    elif k and not i:
+    elif kk and not ii:
         target_head_pitch = min(target_head_pitch + head_step, HEAD_PITCH_MAX)
-    # J/L = yaw 左/右
-    if j and not l:
+
+    if jj and not ll:
         target_head_yaw = min(target_head_yaw + head_step, HEAD_YAW_MAX)
-    elif l and not j:
+    elif ll and not jj:
         target_head_yaw = max(target_head_yaw - head_step, HEAD_YAW_MIN)
 
-    # === 云台高度 T/Y ===
     stem_step = HEAD_STEM_RATE * dt
     if t_up and not y_dn:
         target_head_stem = min(target_head_stem + stem_step, HEAD_STEM_MAX)
@@ -312,16 +276,9 @@ def update_target_velocity(dt):
 
 
 # ============== 舵轮逆运动学 ==============
-
-def swerve_inverse_kinematics(vx, vy, omega):
-    """对每个轮子位置 r_i = (rx, ry):
-       v_wheel = v_body + omega × r = (vx - omega*ry, vy + omega*rx)
-       steer = atan2(v_wheel.y, v_wheel.x)
-       drive = |v_wheel| / wheel_radius
-    """
+def swerve_ik(vx, vy, omega):
     steer_angles = np.zeros(4)
     drive_speeds = np.zeros(4)
-
     for i, (rx, ry) in enumerate(WHEEL_POSITIONS):
         wvx = vx - omega * ry
         wvy = vy + omega * rx
@@ -332,33 +289,46 @@ def swerve_inverse_kinematics(vx, vy, omega):
         else:
             steer_angles[i] = math.atan2(wvy, wvx)
             drive_speeds[i] = speed / WHEEL_RADIUS
-
     return steer_angles, drive_speeds
 
 
 def shortest_steer(target, current):
-    """计算最短转向角差，必要时反转 180° 并反向驱动
-
-    返回 (调整后的转向角, 是否需要反向驱动)
-    """
     diff = target - current
     while diff > math.pi:
         diff -= 2 * math.pi
     while diff < -math.pi:
         diff += 2 * math.pi
     if abs(diff) > math.pi / 2:
-        if diff > 0:
-            target -= math.pi
-        else:
-            target += math.pi
+        target = target - math.pi if diff > 0 else target + math.pi
         return target, True
     return target, False
 
 
-# ============== Touch 笔接入（完整对齐 airbot_force_sim.py 的增量控制）==============
+# ============== 低通滤波器 ==============
+class LowPassFilter:
+    """简单一阶低通滤波"""
+    def __init__(self, alpha=0.3, dim=3):
+        self.alpha = alpha
+        self.value = np.zeros(dim)
+        self.initialized = False
+
+    def filter(self, x):
+        if not self.initialized:
+            self.value = x.copy()
+            self.initialized = True
+        else:
+            self.value = self.alpha * x + (1.0 - self.alpha) * self.value
+        return self.value.copy()
+
+    def reset(self):
+        self.value[:] = 0.0
+        self.initialized = False
+
+
+# ============== Touch 笔遥控（阻抗控制 — 完全对齐 airbot_force_sim.py）==============
 
 def _scale_rotation(R_delta, scale):
-    """将旋转矩阵 R_delta 的旋转角按 scale 倍缩放（Rodrigues 公式）"""
+    """Rodrigues 旋转缩放"""
     trace_val = float(np.clip((np.trace(R_delta) - 1.0) / 2.0, -1.0, 1.0))
     angle = math.acos(trace_val)
     if angle < 1e-6:
@@ -370,102 +340,88 @@ def _scale_rotation(R_delta, scale):
     ]) / (2.0 * math.sin(angle))
     scaled = angle * scale
     K = np.array([
-        [     0.0, -axis[2],  axis[1]],
-        [ axis[2],      0.0, -axis[0]],
-        [-axis[1],  axis[0],      0.0],
+        [0.0, -axis[2], axis[1]],
+        [axis[2], 0.0, -axis[0]],
+        [-axis[1], axis[0], 0.0],
     ])
-    return (np.eye(3)
-            + math.sin(scaled) * K
-            + (1.0 - math.cos(scaled)) * (K @ K))
-
-
-def _quat_to_rot(q):
-    """Mujoco qw, qx, qy, qz → 3×3 旋转矩阵"""
-    R = np.zeros(9)
-    mujoco.mju_quat2Mat(R, np.asarray(q, dtype=float))
-    return R.reshape(3, 3)
-
-
-def _rot_log(R):
-    """3x3 旋转矩阵 → 轴角向量 (3,)，对应 so(3) 的对数映射"""
-    trace_val = float(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))
-    angle = math.acos(trace_val)
-    if angle < 1e-8:
-        return np.zeros(3)
-    axis = np.array([
-        R[2, 1] - R[1, 2],
-        R[0, 2] - R[2, 0],
-        R[1, 0] - R[0, 1],
-    ]) / (2.0 * math.sin(angle))
-    return axis * angle
+    return np.eye(3) + math.sin(scaled) * K + (1.0 - math.cos(scaled)) * (K @ K)
 
 
 class TouchTeleop:
-    """Touch 力反馈笔遥控右臂末端（位置 + 姿态双重增量控制）
+    """Touch 力反馈笔遥控右臂 — 任务空间阻抗控制
 
     控制流程（完全对齐 airbot_force_sim.py）：
-      1. Button2 (白色按钮) = 重置零点 + 姿态标定
-         - 右臂关节归零
-         - 记录当前笔位置为 pen_origin
-         - 记录当前笔姿态为 pen_R0，当前右臂末端姿态为 robot_R0
-         - 记录当前右臂末端 world 位置为 workspace_center
-      2. Button1 (灰色按钮) = 切换夹爪 (暂未接双指)
+      1. Button2 (白色) = 校准：记录笔/机器人参考帧，重置机器人到 home
+      2. Button1 (灰色) = 夹爪开/合 toggle
       3. 校准后持续跟随：
-         - target_pos = workspace_center + R_map @ (pen_pos - pen_origin) * scale
-         - delta_R_pen = R_pen_cur @ pen_R0.T
-         - delta_R_robot = R_map @ delta_R_pen @ R_map.T
-         - R_des = delta_R_robot @ robot_R0
-      4. 差分 IK（位置+姿态）→ 右臂 ctrl[15:21]
+         - 笔增量位移 → workspace_center + R_map * delta * scale
+         - 笔增量旋转 → R_map * delta_R * R_map^T * robot_R0
+      4. 阻抗控制器：tau = J^T * [Kp*(x_des-x) - Kd*v] + qfrc_bias
+      5. 力反馈：cfrc_ext → 低通滤波 → 坐标变换 → 笔力输出
     """
 
-    def __init__(self, model, data, right_eef_body_name="right_link6"):
+    def __init__(self, model, data):
         self.device = None
         self.connected = False
         self.model = model
         self.data = data
 
-        # 右臂末端 body id
-        self.eef_body_id = mujoco.mj_name2id(
-            model, mujoco.mjtObj.mjOBJ_BODY, right_eef_body_name
+        # 右臂末端 site（用于精确 IK 和力反馈）
+        self.eef_site_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_SITE, "right_eef_site"
         )
-        if self.eef_body_id < 0:
-            raise RuntimeError(f"找不到 body: {right_eef_body_name}")
+        if self.eef_site_id < 0:
+            raise RuntimeError("找不到 site: right_eef_site")
 
-        # 右臂 6 个关节的 qpos / qvel 索引
-        self.right_joint_ids = []
-        self.right_qvel_indices = []
-        self.right_qpos_indices = []
+        # 右臂 6 个关节的索引信息
+        self.n_arm = 6
+        self.joint_ids = []
+        self.qpos_indices = []
+        self.qvel_indices = []
         for i in range(1, 7):
             jname = f"right_joint{i}"
             jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jname)
             if jid < 0:
                 raise RuntimeError(f"找不到关节: {jname}")
-            self.right_joint_ids.append(jid)
-            self.right_qvel_indices.append(model.jnt_dofadr[jid])
-            self.right_qpos_indices.append(model.jnt_qposadr[jid])
+            self.joint_ids.append(jid)
+            self.qpos_indices.append(model.jnt_qposadr[jid])
+            self.qvel_indices.append(model.jnt_dofadr[jid])
+
+        # 右臂末端 body id（用于 cfrc_ext 力读取）
+        # 读取 link6 和两个夹爪指的接触力
+        self.contact_body_ids = []
+        for bname in ["right_link6", "right_g2_left", "right_g2_right"]:
+            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, bname)
+            if bid >= 0:
+                self.contact_body_ids.append(bid)
+
+        # 总 DOF 数
+        self.nv = model.nv
 
         # ---- 增量控制参考帧 ----
-        self.pen_origin = None         # 笔位置零点 (mm)
-        self.pen_R0 = None             # 笔姿态零点 (3×3)
-        self.workspace_center = None   # 右臂末端 world 起点 (m)
-        self.robot_R0 = None           # 右臂末端姿态起点 (3×3)
+        self.pen_origin = None
+        self.pen_R0 = None
+        self.workspace_center = None
+        self.robot_R0 = None
+        self.desired_pos = None
+        self.desired_quat = None
 
-        # ---- 累积目标关节角（关键！解决"软掉"问题）----
-        # 每次 IK 更新 target_q += dq，而不是 current_q + dq
-        # 这样 position actuator 会尝试精确达到累积目标，重力下垂不会累计
-        self.target_q = np.zeros(6)
+        # ---- 夹爪 ----
+        self.gripper_target = GRIPPER_OPEN  # 初始张开
 
         # ---- 按钮状态 ----
         self.btn1_last = False
         self.btn2_last = False
         self.calibrated = False
 
-        # IK jacobian buffer
-        self.jac_pos = np.zeros((3, model.nv))
-        self.jac_rot = np.zeros((3, model.nv))
+        # ---- 力反馈 ----
+        self.force_filter = LowPassFilter(alpha=FORCE_FILTER_ALPHA, dim=3)
+
+        # ---- Jacobian buffer ----
+        self.jac_pos = np.zeros((3, self.nv))
+        self.jac_rot = np.zeros((3, self.nv))
 
     def connect(self):
-        """加载 Touch 笔驱动并初始化"""
         if not ENABLE_TOUCH:
             print(">>> Touch 笔已禁用 (ENABLE_TOUCH=0)")
             return False
@@ -484,54 +440,147 @@ class TouchTeleop:
             return True
         except Exception as exc:
             print(f"!!! Touch 笔连接失败: {exc}")
-            print("    继续运行（无右臂 Touch 控制）")
             self.connected = False
             return False
 
     def disconnect(self):
-        if self.connected and self.device is not None:
+        if self.connected and self.device:
             try:
+                self.device.set_force(0, 0, 0)
                 self.device.stop()
             except Exception:
                 pass
 
-    def get_right_eef_position(self):
-        return np.array(self.data.xpos[self.eef_body_id])
+    def get_eef_pos(self):
+        """末端位置 (world frame)"""
+        return self.data.site_xpos[self.eef_site_id].copy()
 
-    def get_right_eef_rotation(self):
-        """右臂末端在 world frame 下的旋转矩阵"""
-        return self.data.xmat[self.eef_body_id].reshape(3, 3).copy()
+    def get_eef_rot(self):
+        """末端旋转矩阵 (world frame)"""
+        return self.data.site_xmat[self.eef_site_id].reshape(3, 3).copy()
+
+    def get_arm_qpos(self):
+        """右臂 6 个关节角"""
+        return np.array([self.data.qpos[idx] for idx in self.qpos_indices])
+
+    def get_arm_qvel(self):
+        """右臂 6 个关节角速度"""
+        return np.array([self.data.qvel[idx] for idx in self.qvel_indices])
+
+    def get_contact_forces(self):
+        """从 cfrc_ext 读取末端接触力 (world frame, N)"""
+        force = np.zeros(3)
+        for bid in self.contact_body_ids:
+            # cfrc_ext[bid] = [tx, ty, tz, fx, fy, fz]
+            force += self.data.cfrc_ext[bid, 3:6]
+        return force
+
+    def robot_force_to_pen(self, robot_force):
+        """机器人末端力 → Touch 笔力（坐标变换 + 缩放 + 限幅）"""
+        pen_force = np.array([
+            FORCE_SCALE * (-robot_force[1]),   # -Fy_robot → Fx_pen
+            FORCE_SCALE * robot_force[2],      # Fz_robot  → Fy_pen
+            FORCE_SCALE * (-robot_force[0]),   # -Fx_robot → Fz_pen
+        ])
+        mag = np.linalg.norm(pen_force)
+        if mag > MAX_PEN_FORCE:
+            pen_force *= MAX_PEN_FORCE / mag
+        return pen_force
 
     def _calibrate(self, pen_pos, pen_R):
-        """按白色按钮触发：记录当前参考帧（不改变机器人姿态）
+        """白色按钮校准：重置右臂到 home，记录参考帧"""
+        # 1. 右臂关节归零（通过直接设置 qpos）
+        for idx in self.qpos_indices:
+            self.data.qpos[idx] = 0.0
+        for idx in self.qvel_indices:
+            self.data.qvel[idx] = 0.0
+        mujoco.mj_forward(self.model, self.data)
 
-        关键：不归零 qpos，否则会导致右臂从当前位置突然跳到零位，
-        期间会因为重力瞬间下垂让用户感觉"软掉"。
-        正确做法：记录当前右臂的关节角作为 target_q 起点。
-        """
-        # 记录机器人当前参考（无重置动作）
-        self.workspace_center = self.get_right_eef_position()
-        self.robot_R0 = self.get_right_eef_rotation()
+        # 2. 记录 home 状态下的末端位置和姿态
+        self.workspace_center = self.get_eef_pos()
+        self.desired_pos = self.workspace_center.copy()
+        self.robot_R0 = self.get_eef_rot()
 
-        # 累积目标 = 当前关节角
-        for i, qp_idx in enumerate(self.right_qpos_indices):
-            self.target_q[i] = self.data.qpos[qp_idx]
+        # 转换为 MuJoCo 四元数
+        quat = np.zeros(4)
+        mujoco.mju_mat2Quat(quat, self.robot_R0.flatten())
+        self.desired_quat = quat.copy()
 
-        # 记录笔参考
+        # 3. 记录笔参考
         self.pen_origin = pen_pos.copy()
         if pen_R is not None and abs(np.linalg.det(pen_R) - 1.0) < 0.2:
             self.pen_R0 = pen_R.copy()
 
+        # 4. 重置力反馈
+        self.force_filter.reset()
+
         self.calibrated = True
-        print(f">>> Touch 零点校准完成")
+        print(f">>> Touch 校准完成")
         print(f"    workspace_center = {np.round(self.workspace_center, 3)}")
         print(f"    pen_origin = {np.round(self.pen_origin, 1)} mm")
-        print(f"    target_q init = {np.round(self.target_q, 3)}")
+
+    def compute_impedance_control(self):
+        """任务空间阻抗控制器 — 返回右臂 6 个关节的力矩
+
+        算法（对齐 airbot_force_sim.py）：
+          tau = Jp^T * F_pos + Jr^T * T_rot + qfrc_bias - null_space_damping * qvel
+        """
+        n = self.n_arm
+
+        if self.desired_pos is None:
+            # 未校准：只做重力补偿
+            return np.array([self.data.qfrc_bias[idx] for idx in self.qvel_indices])
+
+        # 1. 当前末端状态
+        pos_cur = self.get_eef_pos()
+        R_cur = self.get_eef_rot()
+        qvel = self.get_arm_qvel()
+
+        # 2. 雅可比矩阵 (3 × nv)
+        self.jac_pos[:] = 0.0
+        self.jac_rot[:] = 0.0
+        mujoco.mj_jacSite(
+            self.model, self.data,
+            self.jac_pos, self.jac_rot, self.eef_site_id
+        )
+        # 提取右臂部分
+        Jp = self.jac_pos[:, self.qvel_indices]  # 3×6
+        Jr = self.jac_rot[:, self.qvel_indices]  # 3×6
+
+        # 3. 位置误差力
+        pos_err = self.desired_pos - pos_cur
+        vel_cur = Jp @ qvel
+        F_pos = KP_POS @ pos_err - KD_POS @ vel_cur
+
+        # 4. 姿态误差力矩
+        rot_err = np.zeros(3)
+        if self.desired_quat is not None:
+            quat_cur = np.zeros(4)
+            mujoco.mju_mat2Quat(quat_cur, R_cur.flatten())
+            mujoco.mju_subQuat(rot_err, self.desired_quat, quat_cur)
+        omega_cur = Jr @ qvel
+        T_rot = KP_ROT @ rot_err - KD_ROT @ omega_cur
+
+        # 5. 关节力矩 = J^T * [F; T] + 重力补偿
+        tau = Jp.T @ F_pos + Jr.T @ T_rot
+
+        # 加上重力/科里奥利补偿
+        for i, dof_idx in enumerate(self.qvel_indices):
+            tau[i] += self.data.qfrc_bias[dof_idx]
+
+        # 6. 零空间阻尼
+        tau -= NULL_SPACE_DAMPING * qvel
+
+        return tau
 
     def update(self):
-        """每个仿真步调用一次，返回 (tcp_target, calibrated)"""
+        """每步调用：读取 Touch 笔 → 更新目标 → 计算力矩 → 写入 ctrl + 力反馈"""
         if not self.connected:
-            return None, False
+            # 未连接时用重力补偿保持姿态
+            tau = self.compute_impedance_control()
+            for i in range(6):
+                self.data.ctrl[15 + i] = tau[i]
+            return
 
         state = self.device.get_state()
         pen_pos = np.array(state.position)  # mm
@@ -540,7 +589,7 @@ class TouchTeleop:
         pen_R = None
         if state.transform and len(state.transform) == 16:
             T_raw = np.array(state.transform).reshape(4, 4)
-            R_candidate = T_raw.T[:3, :3]  # 列主序存储 → 转置取实际旋转
+            R_candidate = T_raw.T[:3, :3]
             if abs(np.linalg.det(R_candidate) - 1.0) < 0.2:
                 pen_R = R_candidate
 
@@ -552,77 +601,74 @@ class TouchTeleop:
             self._calibrate(pen_pos, pen_R)
         self.btn2_last = btn2
 
-        # Button1 上升沿：夹爪切换（未接双指，先预留）
+        # Button1 上升沿：夹爪 toggle
         if btn1 and not self.btn1_last:
-            print(">>> [夹爪] 切换（未接）")
+            if self.gripper_target > 0.018:
+                self.gripper_target = GRIPPER_CLOSE
+                print(">>> [夹爪] 闭合")
+            else:
+                self.gripper_target = GRIPPER_OPEN
+                print(">>> [夹爪] 张开")
         self.btn1_last = btn1
 
+        # 夹爪执行器 (ctrl[24])
+        self.data.ctrl[24] = self.gripper_target
+
         if not self.calibrated:
-            return None, False
+            tau = self.compute_impedance_control()
+            for i in range(6):
+                self.data.ctrl[15 + i] = tau[i]
+            return
 
         # ========== 位置跟随 ==========
-        delta_pen_mm = pen_pos - self.pen_origin       # mm
-        delta_world = R_MAP @ (delta_pen_mm * PEN_POS_SCALE)  # m
-        target_pos = self.workspace_center + delta_world
+        delta_pen_mm = pen_pos - self.pen_origin
+        delta_world = R_MAP @ (delta_pen_mm * PEN_POS_SCALE)
+        self.desired_pos = self.workspace_center + delta_world
 
         # ========== 姿态跟随 ==========
-        target_R = self.robot_R0
         if pen_R is not None and self.pen_R0 is not None:
             delta_R_pen = pen_R @ self.pen_R0.T
             if PEN_ROT_SCALE != 1.0:
                 delta_R_pen = _scale_rotation(delta_R_pen, PEN_ROT_SCALE)
             delta_R_robot = R_MAP @ delta_R_pen @ R_MAP.T
-            target_R = delta_R_robot @ self.robot_R0
-            U, _, Vt = np.linalg.svd(target_R)
-            target_R = U @ Vt
+            R_robot_des = delta_R_robot @ self.robot_R0
+            # SVD 正交化
+            U, _, Vt = np.linalg.svd(R_robot_des)
+            R_robot_des = U @ Vt
+            quat_new = np.zeros(4)
+            mujoco.mju_mat2Quat(quat_new, R_robot_des.flatten())
+            self.desired_quat = quat_new
 
-        # ========== 差分 IK ==========
-        # ★ 关键修复：从 target_q（累积目标）正运动学算当前"预期"位姿，
-        # 而不是从 data.qpos（实际位置，受重力影响）。
-        # 这样误差累积不会拖累跟随，机械臂会精确追踪目标。
-        current_pos = self.get_right_eef_position()
-        current_R = self.get_right_eef_rotation()
-
-        pos_err = target_pos - current_pos
-        rot_err = _rot_log(target_R @ current_R.T)
-
-        # 雅可比 (6 × nv)
-        mujoco.mj_jacBodyCom(
-            self.model, self.data, self.jac_pos, self.jac_rot, self.eef_body_id
-        )
-        J_full = np.vstack([
-            IK_POS_WEIGHT * self.jac_pos[:, self.right_qvel_indices],
-            IK_ROT_WEIGHT * self.jac_rot[:, self.right_qvel_indices],
-        ])
-        err6 = np.concatenate([
-            IK_POS_WEIGHT * pos_err,
-            IK_ROT_WEIGHT * rot_err,
-        ])
-
-        # 阻尼伪逆
-        JJT = J_full @ J_full.T
-        damped = JJT + IK_DAMPING ** 2 * np.eye(6)
-        dq = J_full.T @ np.linalg.solve(damped, err6)
-
-        # 限幅
-        max_dq = np.max(np.abs(dq))
-        if max_dq > IK_MAX_DELTA:
-            dq = dq * (IK_MAX_DELTA / max_dq)
-
-        # ★ 累积到 target_q（这是核心）
-        self.target_q += dq
-
-        # 关节限位保护
-        for i, jid in enumerate(self.right_joint_ids):
-            jrange = self.model.jnt_range[jid]
-            if jrange[0] < jrange[1]:
-                self.target_q[i] = np.clip(self.target_q[i], jrange[0], jrange[1])
-
-        # 写入 ctrl (索引 15~20)
+        # ========== 阻抗控制 → 关节力矩 ==========
+        tau = self.compute_impedance_control()
         for i in range(6):
-            self.data.ctrl[15 + i] = self.target_q[i]
+            self.data.ctrl[15 + i] = tau[i]
 
-        return target_pos, True
+        # ========== 力反馈 → Touch 笔 ==========
+        contact_force = self.get_contact_forces()
+        smoothed = self.force_filter.filter(contact_force)
+        pen_force = self.robot_force_to_pen(smoothed)
+        try:
+            self.device.set_force(pen_force[0], pen_force[1], pen_force[2])
+        except Exception:
+            pass
+
+    def reset(self):
+        """重置所有状态"""
+        self.calibrated = False
+        self.pen_origin = None
+        self.pen_R0 = None
+        self.desired_pos = None
+        self.desired_quat = None
+        self.workspace_center = None
+        self.robot_R0 = None
+        self.gripper_target = GRIPPER_OPEN
+        self.force_filter.reset()
+        if self.connected:
+            try:
+                self.device.set_force(0, 0, 0)
+            except Exception:
+                pass
 
 
 # ============== 主函数 ==============
@@ -631,7 +677,6 @@ def main():
     global reset_request, target_vx, target_vy, target_omega, target_lift
     global target_head_yaw, target_head_pitch, target_head_stem
 
-    # 关键：禁用 X11 自动重复，避免按住按键时的 press/release 抖动顿挫
     disable_x11_repeat()
 
     print("加载 MJCF:", MJCF_PATH)
@@ -640,54 +685,42 @@ def main():
     print(f"模型: nq={model.nq}, nv={model.nv}, nu={model.nu}")
     print()
     print("=" * 64)
-    print("                    四舵轮全向底盘 — 键盘控制")
+    print("        四舵轮全向底盘 — 键盘 + Touch 笔遥操作")
     print("=" * 64)
     print()
-    print("【重要】请把焦点放在【本终端窗口】，不要点击 MuJoCo 窗口！")
-    print("       原因：MuJoCo viewer 有自己的内置快捷键（C/T/F 等），")
-    print("            按键会触发它的视图变化。pynput 是全局监听，")
-    print("            焦点在终端时既能控制底盘又不会影响 viewer。")
+    print("【重要】请把焦点放在【本终端窗口】")
     print()
     print("控制按键 (按住生效)：")
     print("  底盘:   W/S 前后    A/D 左右    Q/E 转向")
-    print("  升降:   G/H 升/降")
+    print("  升降:   G/H 升/降 (0~0.8m)")
     print("  云台:   I/K 俯仰    J/L 偏航    T/Y 高度上下")
-    print("  Touch:  Button2 白色 = 零点校准 + 跟随启动")
-    print("          Button1 灰色 = 夹爪（未接）")
+    print("  Touch:  Button2 白色 = 零点校准 + 跟随")
+    print("          Button1 灰色 = 夹爪开/合")
     print("  其他:   R 重置      ESC 退出")
-    print()
-    print("Touch 笔使用步骤:")
-    print("  1. 把笔放到舒适的起始位置")
-    print("  2. 按白色按钮进行零点校准（右臂不会跳动）")
-    print("  3. 移动笔，右臂跟随笔的位置和姿态")
-    print("  4. 再按白色按钮可重新校准")
     print("=" * 64)
     print()
 
-    # 启动 pynput 监听器（独立线程）
+    # 启动键盘监听
     listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
     listener.start()
-    print(">>> pynput 键盘监听已启动 (全局，不需要聚焦窗口)")
+    print(">>> pynput 键盘监听已启动")
 
     current_steer = np.zeros(4)
     chassis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "chassis_link")
 
-    # 初始化所有 ctrl 到稳定 home 值（防止重力下垂）
+    # 初始化 ctrl
     mujoco.mj_forward(model, data)
     data.ctrl[:] = 0.0
-    data.ctrl[8] = 0.0                         # lift
-    data.ctrl[9:15]  = ARM_HOME_LEFT           # left arm
-    data.ctrl[15:21] = ARM_HOME_RIGHT          # right arm
-    data.ctrl[21] = 0.0                        # head yaw
-    data.ctrl[22] = 0.0                        # head pitch
-    data.ctrl[23] = 0.0                        # head stem
+    data.ctrl[8] = LIFT_INIT              # lift
+    data.ctrl[9:15] = ARM_HOME_LEFT       # left arm (position control)
+    data.ctrl[24] = GRIPPER_OPEN          # gripper
 
-    # Touch 笔接入
+    # Touch 笔
     touch = TouchTeleop(model, data)
     touch.connect()
     atexit.register(touch.disconnect)
 
-    # 第一人称相机子窗口（head_cam）
+    # 头部相机子窗口
     head_cam_renderer = None
     head_cam_id = -1
     head_cam_last_update = 0.0
@@ -704,11 +737,27 @@ def main():
             print(f"!!! Head camera 启动失败: {exc}")
             head_cam_renderer = None
 
+    # 让物体先 settle（避免 reset 后飞走）
+    print(">>> 物体 settling (0.5s)...")
+    for _ in range(250):  # 0.5s @ 0.002s timestep
+        data.ctrl[9:15] = ARM_HOME_LEFT
+        # 右臂重力补偿
+        tau_init = touch.compute_impedance_control()
+        for i in range(6):
+            data.ctrl[15 + i] = tau_init[i]
+        data.ctrl[24] = GRIPPER_OPEN
+        mujoco.mj_step(model, data)
+    print(">>> Settling 完成")
+
+    # 记录 settle 后的初始状态用于 reset
+    init_qpos = data.qpos.copy()
+    init_qvel = data.qvel.copy()
+
     with mujoco.viewer.launch_passive(model, data) as viewer:
         viewer.cam.distance = 3.0
         viewer.cam.azimuth = 135
         viewer.cam.elevation = -25
-        viewer.cam.lookat[:] = [0, 0, 0.1]
+        viewer.cam.lookat[:] = [0, 0, 0.5]
 
         last_print = 0.0
         last_log = 0.0
@@ -717,75 +766,69 @@ def main():
             step_start = time.time()
             sim_time = data.time
 
-            # 重置请求处理
+            # ===== 重置 =====
             if reset_request:
-                # 1. 重置物理状态（qpos, qvel 归零到初始）
-                mujoco.mj_resetData(model, data)
-                # 2. 所有 ctrl 清零（防止飞奔）
+                # 用 settle 后的初始状态恢复（物体不飞）
+                data.qpos[:] = init_qpos
+                data.qvel[:] = init_qvel
                 data.ctrl[:] = 0.0
-                # 3. 重置 Python 侧目标变量
+                data.ctrl[8] = LIFT_INIT
+                data.ctrl[9:15] = ARM_HOME_LEFT
+                data.ctrl[24] = GRIPPER_OPEN
+
                 target_vx = target_vy = target_omega = 0.0
                 target_lift = LIFT_INIT
                 target_head_yaw = target_head_pitch = 0.0
                 target_head_stem = 0.0
                 current_steer[:] = 0.0
-                # 4. 重置 Touch 校准状态
-                touch.calibrated = False
-                touch.pen_origin = None
-                touch.pen_R0 = None
-                touch.target_q[:] = 0.0
-                # 5. 前向计算刷新一次
+                touch.reset()
+
                 mujoco.mj_forward(model, data)
                 reset_request = False
-                print("\n>>> RESET <<<\n")
+                print("\n>>> RESET (settle state) <<<\n")
 
-            # 1. 更新目标速度
+            # 1. 更新速度
             update_target_velocity(model.opt.timestep)
 
-            # 2. 舵轮逆运动学
-            steer_angles, drive_speeds = swerve_inverse_kinematics(
+            # 2. 舵轮 IK
+            steer_angles, drive_speeds = swerve_ik(
                 target_vx, target_vy, target_omega
             )
-
-            # 3. 转向角优化
             for i in range(4):
                 if abs(drive_speeds[i]) > 1e-4:
-                    steer_angles[i], reversed_ = shortest_steer(
+                    steer_angles[i], rev = shortest_steer(
                         steer_angles[i], current_steer[i]
                     )
-                    if reversed_:
+                    if rev:
                         drive_speeds[i] = -drive_speeds[i]
                     current_steer[i] = steer_angles[i]
 
-            # 4. 写入执行器
+            # 3. 写入执行器
             data.ctrl[0:4] = steer_angles
             data.ctrl[4:8] = drive_speeds
-            data.ctrl[8] = target_lift  # lift_act
+            data.ctrl[8] = target_lift
 
-            # 左臂保持 home pose
+            # 左臂保持 home
             data.ctrl[9:15] = ARM_HOME_LEFT
-            # 右臂：默认 home pose（未校准时），Touch 校准后会被 touch.update() 覆盖
-            if not touch.calibrated:
-                data.ctrl[15:21] = ARM_HOME_RIGHT
-            # Touch 笔更新右臂 ctrl[15:21]
+
+            # 右臂 + 力反馈 + 夹爪 (由 touch.update() 写入 ctrl[15:21] 和 ctrl[24])
             touch.update()
 
-            # 云台 ctrl (索引 21/22/23)
+            # 云台
             data.ctrl[21] = target_head_yaw
             data.ctrl[22] = target_head_pitch
             data.ctrl[23] = target_head_stem
 
-            # 5. 物理步进
+            # 4. 物理步进
             mujoco.mj_step(model, data)
             viewer.sync()
 
-            # 6a. head_cam 子窗口（30 Hz 更新，避免拖慢主循环）
+            # 5. Head Camera 子窗口 (30 Hz)
             if head_cam_renderer is not None and head_cam_id >= 0:
                 if sim_time - head_cam_last_update > 1.0 / 30.0:
                     try:
                         head_cam_renderer.update_scene(data, camera=head_cam_id)
                         frame = head_cam_renderer.render()
-                        # RGB → BGR
                         bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                         cv2.imshow('Head Camera (First Person)', bgr)
                         cv2.waitKey(1)
@@ -793,16 +836,15 @@ def main():
                         pass
                     head_cam_last_update = sim_time
 
-            # 6. 实时 HUD overlay (每 0.1 秒更新一次)
+            # 6. HUD (0.1s 间隔)
             if sim_time - last_print > 0.1:
                 pos = data.xpos[chassis_id]
                 qw, qz = data.xquat[chassis_id, 0], data.xquat[chassis_id, 3]
                 yaw = math.degrees(2.0 * math.atan2(qz, qw))
 
-                # 实际升降高度（从 qpos 读取）
-                lift_actual = data.qpos[7]  # qpos[0:7]=free joint, [7]=lift
+                lift_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "lift_joint")
+                lift_actual = data.qpos[model.jnt_qposadr[lift_jid]]
 
-                # 按键指示器
                 indicator = "".join([
                     "W" if is_key_held('w') else "_",
                     "A" if is_key_held('a') else "_",
@@ -824,18 +866,18 @@ def main():
                     "Y" if is_key_held('y') else "_",
                 ])
 
-                # Touch 笔状态
+                # Touch 状态
                 if touch.connected:
-                    touch_state = "CALIBRATED" if touch.calibrated else "WAIT BTN2"
-                    eef_pos = touch.get_right_eef_position()
+                    t_state = "CALIBRATED" if touch.calibrated else "WAIT BTN2"
+                    eef = touch.get_eef_pos()
+                    grip = "OPEN" if touch.gripper_target > 0.018 else "CLOSED"
                     touch_str = (
-                        f"Touch: {touch_state}\n"
-                        f"R-EEF = ({eef_pos[0]:+.2f},{eef_pos[1]:+.2f},{eef_pos[2]:+.2f})"
+                        f"Touch: {t_state}  Grip: {grip}\n"
+                        f"R-EEF = ({eef[0]:+.2f},{eef[1]:+.2f},{eef[2]:+.2f})"
                     )
                 else:
                     touch_str = "Touch: NOT CONNECTED"
 
-                # 屏幕左上角 HUD
                 hud_left = (
                     f"Chassis  vx={target_vx:+.2f} vy={target_vy:+.2f} w={target_omega:+.2f}\n"
                     f"Lift     target={target_lift:.2f} act={lift_actual:.2f} m\n"
@@ -843,31 +885,28 @@ def main():
                     f"pitch={math.degrees(target_head_pitch):+.0f}  "
                     f"stem={target_head_stem:+.2f}\n"
                     f"\n"
-                    f"Keys WASD QE GH IKJL TY\n"
-                    f"     {indicator}\n"
+                    f"Keys [{indicator}]\n"
                     f"\n"
                     f"{touch_str}\n"
-                    f"\n"
-                    f"Chassis ({pos[0]:+.2f},{pos[1]:+.2f}) yaw={yaw:+.0f}"
+                    f"Pos ({pos[0]:+.2f},{pos[1]:+.2f}) yaw={yaw:+.0f}"
                 )
+
                 hud_right = (
-                    f"Keyboard:\n"
-                    f"W/S  forward/back\n"
-                    f"A/D  strafe L/R\n"
-                    f"Q/E  rotate L/R\n"
-                    f"G/H  lift up/down\n"
-                    f"I/K  head pitch\n"
-                    f"J/L  head yaw\n"
-                    f"T/Y  head stem up/dn\n"
-                    f"R    reset\n"
-                    f"ESC  quit\n"
+                    f"W/S forward/back\n"
+                    f"A/D strafe L/R\n"
+                    f"Q/E rotate L/R\n"
+                    f"G/H lift (0~0.8m)\n"
+                    f"I/K head pitch\n"
+                    f"J/L head yaw\n"
+                    f"T/Y head stem\n"
+                    f"R   reset\n"
+                    f"ESC quit\n"
                     f"\n"
                     f"Touch Pen:\n"
-                    f"Btn2 white = calibrate\n"
-                    f"Btn1 grey  = gripper\n"
-                    f"\n"
-                    f">>> Focus terminal\n"
+                    f"Btn2 = calibrate\n"
+                    f"Btn1 = gripper\n"
                 )
+
                 viewer.set_texts([
                     (mujoco.mjtFontScale.mjFONTSCALE_150,
                      mujoco.mjtGridPos.mjGRID_TOPLEFT,
@@ -876,10 +915,8 @@ def main():
                      mujoco.mjtGridPos.mjGRID_TOPRIGHT,
                      hud_right, None),
                 ])
-
                 last_print = sim_time
 
-                # 终端日志降到 0.5s 一次
                 if sim_time - last_log > 0.5:
                     print(f"t={sim_time:6.2f}  vx={target_vx:+.2f} vy={target_vy:+.2f} ω={target_omega:+.2f}  "
                           f"pos=({pos[0]:+.2f},{pos[1]:+.2f}) yaw={yaw:+.0f}°  [{indicator}]",

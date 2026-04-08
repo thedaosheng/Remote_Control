@@ -35,7 +35,7 @@
   <visual>
     <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
     <rgba haze="0.15 0.25 0.35 1"/>
-    <global azimuth="120" elevation="-20"/>
+    <global azimuth="120" elevation="-20" offwidth="1280" offheight="720"/>
   </visual>
 
   <!-- 资源：纹理 + 材质 + Airbot 双臂 mesh -->
@@ -108,9 +108,9 @@
   <!-- ===================== 世界 ===================== -->
   <worldbody>
 
-    <!-- 地面 - contype=4 接收 wheel 碰撞 -->
+    <!-- 地面 - contype=7 接收所有碰撞（轮子contype=2、物体contype=1、底盘等）-->
     <geom name="floor" type="plane" size="20 20 0.1" material="groundplane"
-          contype="4" conaffinity="2"/>
+          contype="7" conaffinity="7"/>
 
     <!-- ============== 工作桌 ============== -->
     <!--
@@ -119,19 +119,25 @@
       考虑到机器人右臂 home 末端 ~0.95m，桌面低 30cm 使双臂能自然俯视操作
     -->
     <body name="table" pos="0.75 0 0">
-      <!-- 桌面 -->
+      <!-- 桌面（condim=6 + 硬接触参数，确保刚性碰撞）-->
       <geom name="table_top" type="box" size="0.6 0.4 0.025"
             pos="0 0 0.625" rgba="0.72 0.52 0.35 1"
-            friction="1.0 0.01 0.001"/>
-      <!-- 四根桌腿 -->
+            friction="1.0 0.01 0.001"
+            condim="6" solref="0.001 1" solimp="0.95 0.99 0.001"
+            contype="1" conaffinity="1"/>
+      <!-- 四根桌腿（加碰撞属性）-->
       <geom name="leg_fl" type="box" size="0.025 0.025 0.30"
-            pos=" 0.55  0.375 0.30" rgba="0.4 0.3 0.2 1"/>
+            pos=" 0.55  0.375 0.30" rgba="0.4 0.3 0.2 1"
+            contype="1" conaffinity="1"/>
       <geom name="leg_fr" type="box" size="0.025 0.025 0.30"
-            pos=" 0.55 -0.375 0.30" rgba="0.4 0.3 0.2 1"/>
+            pos=" 0.55 -0.375 0.30" rgba="0.4 0.3 0.2 1"
+            contype="1" conaffinity="1"/>
       <geom name="leg_rl" type="box" size="0.025 0.025 0.30"
-            pos="-0.55  0.375 0.30" rgba="0.4 0.3 0.2 1"/>
+            pos="-0.55  0.375 0.30" rgba="0.4 0.3 0.2 1"
+            contype="1" conaffinity="1"/>
       <geom name="leg_rr" type="box" size="0.025 0.025 0.30"
-            pos="-0.55 -0.375 0.30" rgba="0.4 0.3 0.2 1"/>
+            pos="-0.55 -0.375 0.30" rgba="0.4 0.3 0.2 1"
+            contype="1" conaffinity="1"/>
     </body>
 
     <!-- ============== 桌上物品 ============== -->
@@ -147,35 +153,50 @@
     -->
 
     <!--
-      三个物体都放在桌面上方 5cm 处，euler=1.5708 让 mesh Y 轴变成 world Z 轴（高度）
-      物理 settle 后会稳定在桌面上
+      三个物体：body 无 euler（碰撞圆柱保持竖直），只在 mesh geom 上加 euler 旋转视觉
+      碰撞圆柱的 Z 轴 = 世界 Z 轴（竖直），稳定不倒
+      inertial pos 调到 Z 方向（因为 body frame = world frame）
     -->
 
-    <!-- 主筒子（锅）-->
-    <body name="pot" pos="0.80 -0.18 0.80" euler="0 1.5708 0">
+    <!-- 主筒子（锅）— 桌面正中央 -->
+    <body name="pot" pos="0.75 0.0 0.72">
       <freejoint name="pot_free"/>
-      <inertial pos="0 0.06 0" mass="1.2" diaginertia="0.008 0.012 0.008"/>
+      <inertial pos="0 0 0.05" mass="1.2" diaginertia="0.008 0.012 0.008"/>
+      <!-- 碰撞用竖直圆柱（Z轴对齐世界Z轴，不会倒）-->
+      <geom name="pot_col" type="cylinder" size="0.04 0.064"
+            rgba="0 0 0 0" friction="1.2 0.02 0.001"
+            condim="6" solref="0.005 1" solimp="0.90 0.95 0.001"
+            contype="1" conaffinity="1"/>
+      <!-- 视觉 mesh：euler 只在 geom 级别旋转，让 mesh Y→Z -->
       <geom name="pot_mesh" type="mesh" mesh="main_cylinder"
-            rgba="0.75 0.75 0.78 1" friction="1.2 0.02 0.001"
-            contype="1" conaffinity="1"/>
+            euler="1.5708 0 0"
+            rgba="0.75 0.75 0.78 1" contype="0" conaffinity="0"/>
     </body>
 
-    <!-- 盖板 -->
-    <body name="cover" pos="0.80 0.20 0.75" euler="0 1.5708 0">
+    <!-- 盖板 — 桌面右侧（薄圆盘，本身就是扁的，不容易倒）-->
+    <body name="cover" pos="0.75 0.15 0.66">
       <freejoint name="cover_free"/>
-      <inertial pos="0 0.0025 0" mass="0.3" diaginertia="0.003 0.006 0.003"/>
-      <geom name="cover_mesh" type="mesh" mesh="cover_plate"
-            rgba="0.82 0.72 0.45 1" friction="1.2 0.02 0.001"
+      <inertial pos="0 0 0.0025" mass="0.3" diaginertia="0.003 0.006 0.003"/>
+      <geom name="cover_col" type="cylinder" size="0.04 0.003"
+            rgba="0 0 0 0" friction="1.2 0.02 0.001"
+            condim="6" solref="0.005 1" solimp="0.90 0.95 0.001"
             contype="1" conaffinity="1"/>
+      <geom name="cover_mesh" type="mesh" mesh="cover_plate"
+            euler="1.5708 0 0"
+            rgba="0.82 0.72 0.45 1" contype="0" conaffinity="0"/>
     </body>
 
-    <!-- 隔板筒 -->
-    <body name="separator" pos="0.55 0.00 0.80" euler="0 1.5708 0">
+    <!-- 隔板筒 — 桌面左前方 -->
+    <body name="separator" pos="0.60 -0.10 0.70">
       <freejoint name="separator_free"/>
-      <inertial pos="0 0.04 0" mass="0.4" diaginertia="0.002 0.003 0.002"/>
-      <geom name="separator_mesh" type="mesh" mesh="separator_tube"
-            rgba="0.6 0.6 0.65 1" friction="1.2 0.02 0.001"
+      <inertial pos="0 0 0.04" mass="0.4" diaginertia="0.002 0.003 0.002"/>
+      <geom name="separator_col" type="cylinder" size="0.025 0.04"
+            rgba="0 0 0 0" friction="1.2 0.02 0.001"
+            condim="6" solref="0.005 1" solimp="0.90 0.95 0.001"
             contype="1" conaffinity="1"/>
+      <geom name="separator_mesh" type="mesh" mesh="separator_tube"
+            euler="1.5708 0 0"
+            rgba="0.6 0.6 0.65 1" contype="0" conaffinity="0"/>
     </body>
 
     <!-- 灯光 -->
@@ -200,7 +221,7 @@
             pos="0.20 0 0.05" rgba="1 0.2 0.2 1" contype="0" conaffinity="0"/>
 
       <!-- 升降导轨立柱（静态挂在底盘上，torso 沿它滑动）-->
-      <geom name="lift_rail" type="cylinder" size="0.03 0.38"
+      <geom name="lift_rail" type="cylinder" size="0.03 0.55"
             pos="0 0 0.42" rgba="0.5 0.5 0.55 1"
             contype="0" conaffinity="0"/>
 
@@ -210,7 +231,7 @@
         初始位置：torso 底部贴在 chassis 顶部 (z=0.04 相对底盘中心)
       -->
       <body name="torso_link" pos="0 0 0.04">
-        <joint name="lift_joint" type="slide" axis="0 0 1" range="0 0.5"
+        <joint name="lift_joint" type="slide" axis="0 0 1" range="0 0.8"
                damping="8" frictionloss="0.5"/>
         <inertial pos="0 0 0.20" mass="8.0" diaginertia="0.8 0.8 0.4"/>
 
@@ -289,21 +310,29 @@
                         mass="0.918" diaginertia="0.0348 0.0346 0.000895"/>
               <joint class="arm_joint" name="left_joint2" axis="0 0 1" range="-2.97 0.17"/>
               <geom class="arm_visual" mesh="airbot_link2"/>
+              <!-- left_link2 碰撞胶囊 -->
+              <geom class="arm_collision" type="capsule" fromto="0 0 0  0.27 0 0" size="0.03"/>
               <body name="left_link3" pos="0.27009 0 0" quat="0.55806 0 0 0.8298">
                 <inertial pos="0 0.107 0.0082" quat="0.7095 0.7047 -0.002 0.0024"
                           mass="0.7" diaginertia="0.0157 0.0155 0.000459"/>
                 <joint class="arm_joint" name="left_joint3" axis="0 0 1" range="-0.087 3.14"/>
                 <geom class="arm_visual" mesh="airbot_link3"/>
+                <!-- left_link3 碰撞胶囊 -->
+                <geom class="arm_collision" type="capsule" fromto="0 0 0  0 0.29 0" size="0.03"/>
                 <body name="left_link4" pos="0 0.29015 0" quat="0.5 -0.5 -0.5 -0.5">
                   <inertial pos="0 0.003 -0.019" quat="0.706 -0.004 0.004 0.708"
                             mass="0.359" diaginertia="0.000529 0.000518 0.000137"/>
                   <joint class="arm_joint" name="left_joint4" axis="0 0 1" range="-3.01 3.01"/>
                   <geom class="arm_visual" mesh="airbot_link4"/>
+                  <!-- left_link4 碰撞胶囊 -->
+                  <geom class="arm_collision" type="capsule" fromto="0 0 -0.03  0 0 0.03" size="0.025"/>
                   <body name="left_link5" quat="0.7071 0.7071 0 0">
                     <inertial pos="0 0.033 0.0024" quat="0.687 0.727 0.001 -0.001"
                               mass="0.403" diaginertia="0.00116 0.00109 0.00024"/>
                     <joint class="arm_joint" name="left_joint5" axis="0 0 1" range="-1.76 1.76"/>
                     <geom class="arm_visual" mesh="airbot_link5"/>
+                    <!-- left_link5 碰撞胶囊 -->
+                    <geom class="arm_collision" type="capsule" fromto="0 0 0  0 0.04 0" size="0.025"/>
                     <body name="left_link6" quat="0.7071 -0.7071 0 0">
                       <inertial pos="0 -0.003 0.12" quat="0.691 -0.037 0.040 0.721"
                                 mass="0.617" diaginertia="0.00267 0.00259 0.000588"/>
@@ -313,6 +342,8 @@
                       <geom class="arm_visual" pos="0 0 0.0955" mesh="airbot_g2_base"/>
                       <geom class="arm_visual" pos="0 0 0.166" quat="0.7071 0 -0.7071 0" mesh="airbot_g2_left"/>
                       <geom class="arm_visual" pos="0 0 0.166" quat="0 0.7071 0 0.7071" mesh="airbot_g2_right"/>
+                      <!-- 左臂末端 IK 参考 site -->
+                      <site name="left_eef_site" pos="0 0 0.166" size="0.01" rgba="0 1 0 0.5"/>
                       <!-- 末端碰撞胶囊（覆盖 link6 到夹爪尖端，和桌面/物体碰撞）-->
                       <geom class="arm_collision" type="capsule"
                             fromto="0 0 0  0 0 0.20" size="0.035"/>
@@ -337,21 +368,29 @@
                         mass="0.918" diaginertia="0.0348 0.0346 0.000895"/>
               <joint class="arm_joint" name="right_joint2" axis="0 0 1" range="-2.97 0.17"/>
               <geom class="arm_visual" mesh="airbot_link2"/>
+              <!-- right_link2 碰撞胶囊 -->
+              <geom class="arm_collision" type="capsule" fromto="0 0 0  0.27 0 0" size="0.03"/>
               <body name="right_link3" pos="0.27009 0 0" quat="0.55806 0 0 0.8298">
                 <inertial pos="0 0.107 0.0082" quat="0.7095 0.7047 -0.002 0.0024"
                           mass="0.7" diaginertia="0.0157 0.0155 0.000459"/>
                 <joint class="arm_joint" name="right_joint3" axis="0 0 1" range="-0.087 3.14"/>
                 <geom class="arm_visual" mesh="airbot_link3"/>
+                <!-- right_link3 碰撞胶囊 -->
+                <geom class="arm_collision" type="capsule" fromto="0 0 0  0 0.29 0" size="0.03"/>
                 <body name="right_link4" pos="0 0.29015 0" quat="0.5 -0.5 -0.5 -0.5">
                   <inertial pos="0 0.003 -0.019" quat="0.706 -0.004 0.004 0.708"
                             mass="0.359" diaginertia="0.000529 0.000518 0.000137"/>
                   <joint class="arm_joint" name="right_joint4" axis="0 0 1" range="-3.01 3.01"/>
                   <geom class="arm_visual" mesh="airbot_link4"/>
+                  <!-- right_link4 碰撞胶囊 -->
+                  <geom class="arm_collision" type="capsule" fromto="0 0 -0.03  0 0 0.03" size="0.025"/>
                   <body name="right_link5" quat="0.7071 0.7071 0 0">
                     <inertial pos="0 0.033 0.0024" quat="0.687 0.727 0.001 -0.001"
                               mass="0.403" diaginertia="0.00116 0.00109 0.00024"/>
                     <joint class="arm_joint" name="right_joint5" axis="0 0 1" range="-1.76 1.76"/>
                     <geom class="arm_visual" mesh="airbot_link5"/>
+                    <!-- right_link5 碰撞胶囊 -->
+                    <geom class="arm_collision" type="capsule" fromto="0 0 0  0 0.04 0" size="0.025"/>
                     <body name="right_link6" quat="0.7071 -0.7071 0 0">
                       <inertial pos="0 -0.003 0.12" quat="0.691 -0.037 0.040 0.721"
                                 mass="0.617" diaginertia="0.00267 0.00259 0.000588"/>
@@ -359,8 +398,26 @@
                       <geom class="arm_visual" mesh="airbot_link6"/>
                       <geom class="arm_visual" pos="0 0 0.0955" mesh="airbot_eef"/>
                       <geom class="arm_visual" pos="0 0 0.0955" mesh="airbot_g2_base"/>
-                      <geom class="arm_visual" pos="0 0 0.166" quat="0.7071 0 -0.7071 0" mesh="airbot_g2_left"/>
-                      <geom class="arm_visual" pos="0 0 0.166" quat="0 0.7071 0 0.7071" mesh="airbot_g2_right"/>
+                      <!-- 右臂夹爪左指（带关节）-->
+                      <body name="right_g2_left" pos="0 0 0.166" quat="0.7071 0 -0.7071 0">
+                        <inertial pos="0 0 0" mass="0.05" diaginertia="0.00001 0.00001 0.00001"/>
+                        <joint name="right_g2_left_joint" type="hinge" axis="0 0 1"
+                               range="0 0.8" damping="0.1"/>
+                        <geom type="mesh" mesh="airbot_g2_left" rgba="0.75 0.75 0.75 1"
+                              condim="6" friction="3.0 1.0 0.1"
+                              contype="1" conaffinity="1"/>
+                      </body>
+                      <!-- 右臂夹爪右指（带关节）-->
+                      <body name="right_g2_right" pos="0 0 0.166" quat="0 0.7071 0 0.7071">
+                        <inertial pos="0 0 0" mass="0.05" diaginertia="0.00001 0.00001 0.00001"/>
+                        <joint name="right_g2_right_joint" type="hinge" axis="0 0 1"
+                               range="0 0.8" damping="0.1"/>
+                        <geom type="mesh" mesh="airbot_g2_right" rgba="0.75 0.75 0.75 1"
+                              condim="6" friction="3.0 1.0 0.1"
+                              contype="1" conaffinity="1"/>
+                      </body>
+                      <!-- 右臂末端 IK 参考 site -->
+                      <site name="right_eef_site" pos="0 0 0.166" size="0.01" rgba="0 1 0 0.5"/>
                       <!-- 末端碰撞胶囊 -->
                       <geom class="arm_collision" type="capsule"
                             fromto="0 0 0  0 0 0.20" size="0.035"/>
@@ -446,7 +503,7 @@
 
     <!-- 升降位置控制 (目标高度 m)，索引 8 -->
     <position name="lift_act" joint="lift_joint" kp="3000" kv="80"
-              forcerange="-800 800" ctrlrange="0 0.5"/>
+              forcerange="-800 800" ctrlrange="0 0.8"/>
 
     <!-- 左臂 6 关节 (索引 9~14) -->
     <position class="arm_joint" name="left_j1_act" joint="left_joint1"/>
@@ -456,13 +513,13 @@
     <position class="arm_joint" name="left_j5_act" joint="left_joint5"/>
     <position class="arm_joint" name="left_j6_act" joint="left_joint6"/>
 
-    <!-- 右臂 6 关节 (索引 15~20) -->
-    <position class="arm_joint" name="right_j1_act" joint="right_joint1"/>
-    <position class="arm_joint" name="right_j2_act" joint="right_joint2"/>
-    <position class="arm_joint" name="right_j3_act" joint="right_joint3"/>
-    <position class="arm_joint" name="right_j4_act" joint="right_joint4"/>
-    <position class="arm_joint" name="right_j5_act" joint="right_joint5"/>
-    <position class="arm_joint" name="right_j6_act" joint="right_joint6"/>
+    <!-- 右臂 6 关节 - 力矩控制 (索引 15~20) -->
+    <motor name="right_j1_motor" joint="right_joint1" ctrllimited="true" ctrlrange="-200 200"/>
+    <motor name="right_j2_motor" joint="right_joint2" ctrllimited="true" ctrlrange="-200 200"/>
+    <motor name="right_j3_motor" joint="right_joint3" ctrllimited="true" ctrlrange="-200 200"/>
+    <motor name="right_j4_motor" joint="right_joint4" ctrllimited="true" ctrlrange="-100 100"/>
+    <motor name="right_j5_motor" joint="right_joint5" ctrllimited="true" ctrlrange="-100 100"/>
+    <motor name="right_j6_motor" joint="right_joint6" ctrllimited="true" ctrlrange="-100 100"/>
 
     <!-- 头部云台 yaw + pitch + 高度 slide (索引 21~23) -->
     <position name="head_yaw_act"   joint="head_yaw_joint"
@@ -471,6 +528,25 @@
               kp="200" kv="8" forcerange="-30 30" ctrlrange="-0.7854 0.7854"/>
     <position name="head_stem_act"  joint="head_stem"
               kp="1500" kv="60" forcerange="-200 200" ctrlrange="-0.05 0.40"/>
+
+    <!-- 右臂夹爪 (索引 24) -->
+    <position name="right_gripper_act" tendon="right_gripper_gear"
+              kp="200" kv="5" ctrllimited="true" ctrlrange="0 0.0366"
+              forcelimited="true" forcerange="-10 10"/>
   </actuator>
+
+  <!-- 右臂夹爪肌腱联动 -->
+  <tendon>
+    <fixed name="right_gripper_gear">
+      <joint joint="right_g2_left_joint" coef="0.5"/>
+      <joint joint="right_g2_right_joint" coef="0.5"/>
+    </fixed>
+  </tendon>
+
+  <!-- 右臂两指同步约束 -->
+  <equality>
+    <joint joint1="right_g2_left_joint" joint2="right_g2_right_joint"
+           polycoef="0 1 0 0 0"/>
+  </equality>
 
 </mujoco>
