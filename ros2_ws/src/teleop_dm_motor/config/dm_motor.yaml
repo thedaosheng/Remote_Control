@@ -1,0 +1,40 @@
+# dm_motor_controller_node 默认参数
+# launch 时通过 -p key:=value 覆盖, 或者运行时 ros2 param set 改
+
+dm_motor_controller:
+  ros__parameters:
+    # ===== 硬件 =====
+    serial_port: "/dev/ttyACM0"  # 达妙 HDSC USB-CAN
+    baudrate: 921600
+    yaw_can_id: 1               # 0x01
+    pitch_can_id: 2             # 0x02
+    yaw_master_id: 17           # 0x11
+    pitch_master_id: 18         # 0x12
+
+    # ===== 默认档位 =====
+    # preset 切换触发批量参数更新, 详见 dm_motor_presets.yaml
+    preset: "L4"
+
+    # 单参数 (preset 切换时会被覆盖, 但用户也可以单独 ros2 param set 覆盖)
+    kp: 25.0                     # MIT 位置刚度
+    kd: 1.0                      # MIT 速度阻尼
+    rate_limit_dps: 500.0        # 逐帧位置变化上限 (deg/s)
+    feedforward_enabled: true
+    ff_gain: 1.2
+    ff_ema_alpha: 0.7
+
+    # ===== 极性和缩放 (硬件相关, 一般不动) =====
+    sign_yaw: 1
+    sign_pitch: 1
+    scale_yaw: 1.0
+    scale_pitch: 1.0
+
+    # ===== 启动行为 =====
+    ramp_to_zero_secs: 3.0       # 启动时从当前位置 ramp 到电机零点 (0,0) 的时长
+    takeover_fade_secs: 1.5      # vp 输入淡入时长
+    data_timeout_secs: 0.5       # >0.5s 没收到 vp pose 就回到零点
+
+    # ===== 调试 =====
+    print_interval_secs: 2.0
+    publish_target_state: true   # 是否额外 publish /dm_motor/target_states
+    control_rate_hz: 200         # 控制循环频率

@@ -1,0 +1,14 @@
+# 启动互动校准流程 (用户掰电机, node 自动写 calibration.yaml)
+#
+# 流程:
+#   1. 调用 service, axis = "yaw" 或 "pitch"
+#   2. node 失能对应电机, 等用户掰
+#   3. node 监听用户的"掰好了"信号 (通过 std_srvs/Trigger 触发 read)
+#   4. node 写 calibration.yaml
+
+string axis             # "yaw" 或 "pitch"
+string side             # "min" 或 "max" (掰到哪一侧)
+---
+bool success
+float64 measured_deg    # 测到的位置 (度)
+string message

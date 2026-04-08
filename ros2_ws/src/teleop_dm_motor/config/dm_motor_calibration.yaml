@@ -1,0 +1,12 @@
+# 物理工作区校准数据
+# 这是机器特定的, **不要 commit** (在 .gitignore 里)
+# 这份是示例 (来自一台真实机器, 2026-04-07)
+# 实际部署时跑 dm_motor_calibration_node 自动覆盖
+
+dm_motor_controller:
+  ros__parameters:
+    yaw_min_deg: -37.15
+    yaw_max_deg: 26.02
+    pitch_min_deg: -55.78
+    pitch_max_deg: 64.22
+    safety_margin_deg: 5.0

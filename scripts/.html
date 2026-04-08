@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Head Pose Tracker - Vision Pro</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0a0a0f;
+    --surface: #141420;
+    --border: #2a2a3a;
+    --text: #e0e0e8;
+    --dim: #6a6a80;
+    --accent: #4af;
+    --green: #4f8;
+    --red: #f55;
+    --orange: #fa4;
+  }
+
+  body {
+    font-family: 'DM Mono', monospace;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+
+  .container {
+    max-width: 600px;
+    width: 100%;
+  }
+
+  h1 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.6rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+    letter-spacing: -0.5px;
+  }
+
+  .subtitle {
+    color: var(--dim);
+    font-size: 0.8rem;
+    margin-bottom: 30px;
+  }
+
+  .status-bar {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 24px;
+    font-size: 0.75rem;
+  }
+
+  .status-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+  }
+  .dot.ok { background: var(--green); }
+  .dot.warn { background: var(--orange); }
+  .dot.pulse { animation: pulse 1.5s infinite; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+
+  .card-title {
+    font-size: 0.7rem;
+    color: var(--dim);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 12px;
+  }
+
+  .pose-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .pose-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background: rgba(255,255,255,0.03);
+    border-radius: 6px;
+  }
+
+  .pose-label {
+    color: var(--dim);
+    font-size: 0.75rem;
+  }
+
+  .pose-value {
+    font-size: 0.85rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+  }
+
+  .btn {
+    width: 100%;
+    padding: 16px;
+    border: none;
+    border-radius: 10px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-bottom: 12px;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: #000;
+  }
+  .btn-primary:hover { filter: brightness(1.15); }
+  .btn-primary:disabled {
+    background: var(--border);
+    color: var(--dim);
+    cursor: not-allowed;
+  }
+
+  .btn-stop {
+    background: transparent;
+    border: 1px solid var(--red);
+    color: var(--red);
+  }
+
+  .log {
+    font-size: 0.7rem;
+    color: var(--dim);
+    max-height: 150px;
+    overflow-y: auto;
+    padding: 12px;
+    line-height: 1.8;
+  }
+
+  .log-entry { opacity: 0.7; }
+  .log-entry.error { color: var(--red); opacity: 1; }
+  .log-entry.success { color: var(--green); opacity: 1; }
+
+  .hz-display {
+    font-size: 1.8rem;
+    font-weight: 300;
+    color: var(--accent);
+    text-align: center;
+    padding: 10px 0;
+  }
+  .hz-label {
+    font-size: 0.7rem;
+    color: var(--dim);
+    text-align: center;
+  }
+
+  .config-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+  .config-row:last-child { border: none; }
+  .config-label { color: var(--dim); font-size: 0.75rem; }
+  .config-value { font-size: 0.8rem; }
+
+  input[type="text"] {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.8rem;
+    padding: 8px 12px;
+    border-radius: 6px;
+    width: 100%;
+    margin-bottom: 12px;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>🎯 Head Pose Tracker</h1>
+  <p class="subtitle">Vision Pro → WebXR → WebSocket → Cloud → Linux</p>
+
+  <!-- Status -->
+  <div class="status-bar">
+    <div class="status-item">
+      <div class="dot" id="dotWs"></div>
+      <span id="statusWs">WS: 未连接</span>
+    </div>
+    <div class="status-item">
+      <div class="dot" id="dotXr"></div>
+      <span id="statusXr">XR: 未启动</span>
+    </div>
+    <div class="status-item">
+      <div class="dot" id="dotSend"></div>
+      <span id="statusSend">发送: 停止</span>
+    </div>
+  </div>
+
+  <!-- Config -->
+  <div class="card" id="configCard">
+    <div class="card-title">配置</div>
+    <label class="config-label">信令服务器地址</label>
+    <input type="text" id="wsUrl" value="ws://39.102.113.104:8765" />
+    <label class="config-label">发送频率 (Hz)</label>
+    <input type="text" id="sendHz" value="30" />
+    <button class="btn btn-primary" id="btnConnect" onclick="connectWS()">连接信令服务器</button>
+  </div>
+
+  <!-- Start XR -->
+  <div class="card hidden" id="xrCard">
+    <div class="card-title">WebXR 控制</div>
+    <button class="btn btn-primary" id="btnStartXR" onclick="startXR()">进入 VR 模式 (采集头部姿态)</button>
+    <button class="btn btn-stop hidden" id="btnStopXR" onclick="stopXR()">停止采集</button>
+  </div>
+
+  <!-- Pose Data -->
+  <div class="card hidden" id="poseCard">
+    <div class="card-title">实时头部姿态 (6DoF)</div>
+    <div class="pose-grid">
+      <div class="pose-row"><span class="pose-label">X</span><span class="pose-value" id="px">0.000</span></div>
+      <div class="pose-row"><span class="pose-label">Y</span><span class="pose-value" id="py">0.000</span></div>
+      <div class="pose-row"><span class="pose-label">Z</span><span class="pose-value" id="pz">0.000</span></div>
+      <div class="pose-row"><span class="pose-label">QX</span><span class="pose-value" id="qx">0.000</span></div>
+      <div class="pose-row"><span class="pose-label">QY</span><span class="pose-value" id="qy">0.000</span></div>
+      <div class="pose-row"><span class="pose-label">QZ</span><span class="pose-value" id="qz">0.000</span></div>
+      <div class="pose-row"><span class="pose-label">QW</span><span class="pose-value" id="qw">1.000</span></div>
+      <div class="pose-row">
+        <span class="pose-label">频率</span>
+        <span class="pose-value" id="actualHz">0 Hz</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="card hidden" id="statsCard">
+    <div class="hz-display" id="frameCount">0</div>
+    <div class="hz-label">已发送帧数</div>
+  </div>
+
+  <!-- Log -->
+  <div class="card">
+    <div class="card-title">日志</div>
+    <div class="log" id="logArea"></div>
+  </div>
+</div>
+
+<script>
+// ============================================
+// 全局状态
+// ============================================
+let ws = null;
+let xrSession = null;
+let refSpace = null;
+let sending = false;
+let frameCounter = 0;
+let lastSendTime = 0;
+let sendInterval = 1000 / 30; // 默认 30Hz
+let hzCounter = 0;
+let hzTimer = null;
+
+// ============================================
+// 日志
+// ============================================
+function log(msg, type = '') {
+  const el = document.getElementById('logArea');
+  const entry = document.createElement('div');
+  entry.className = `log-entry ${type}`;
+  entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(entry);
+  el.scrollTop = el.scrollHeight;
+  console.log(msg);
+}
+
+// ============================================
+// WebSocket 连接
+// ============================================
+function connectWS() {
+  const url = document.getElementById('wsUrl').value;
+  sendInterval = 1000 / parseInt(document.getElementById('sendHz').value || '30');
+
+  log(`连接: ${url}`);
+  document.getElementById('btnConnect').disabled = true;
+
+  try {
+    ws = new WebSocket(url);
+  } catch (e) {
+    log(`WebSocket 创建失败: ${e}`, 'error');
+    document.getElementById('btnConnect').disabled = false;
+    return;
+  }
+
+  ws.onopen = () => {
+    log('WebSocket 已连接', 'success');
+    setStatus('dotWs', 'statusWs', 'ok', 'WS: 已连接');
+
+    // 注册为 pose-sender
+    ws.send(JSON.stringify({
+      type: 'register',
+      role: 'pose-sender',
+      device: 'vision-pro',
+      ip: 'webxr'
+    }));
+    log('已注册为 pose-sender');
+
+    // 显示 XR 控制
+    document.getElementById('xrCard').classList.remove('hidden');
+  };
+
+  ws.onclose = () => {
+    log('WebSocket 已断开', 'error');
+    setStatus('dotWs', 'statusWs', '', 'WS: 已断开');
+    document.getElementById('btnConnect').disabled = false;
+  };
+
+  ws.onerror = (e) => {
+    log(`WebSocket 错误: ${e.type}`, 'error');
+  };
+
+  ws.onmessage = (e) => {
+    // 接收云端转发的消息（如果需要）
+    try {
+      const data = JSON.parse(e.data);
+      if (data.type === 'ping') {
+        // 回复 pong
+        ws.send(JSON.stringify({
+          type: 'pong',
+          sender_time: data.sender_time,
+          receiver_time: Date.now() / 1000,
+          seq: data.seq
+        }));
+      }
+    } catch (err) {}
+  };
+}
+
+// ============================================
+// WebXR 会话
+// ============================================
+async function startXR() {
+  if (!navigator.xr) {
+    log('此浏览器不支持 WebXR', 'error');
+    return;
+  }
+
+  const supported = await navigator.xr.isSessionSupported('immersive-vr');
+  if (!supported) {
+    log('不支持 immersive-vr 模式', 'error');
+    log('请在 Safari 设置中启用 WebXR：');
+    log('设置 → Apps → Safari → Advanced → Feature Flags → WebXR Device API');
+    return;
+  }
+
+  try {
+    log('请求 immersive-vr 会话...');
+    xrSession = await navigator.xr.requestSession('immersive-vr');
+    log('WebXR 会话已启动！', 'success');
+    setStatus('dotXr', 'statusXr', 'ok', 'XR: 运行中');
+
+    // 获取参考空间 (local = 6DoF 头部追踪)
+    refSpace = await xrSession.requestReferenceSpace('local');
+    log('参考空间: local (6DoF)');
+
+    // 需要一个 WebGL context 来维持 XR 会话
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+    const glLayer = new XRWebGLLayer(xrSession, gl);
+    await xrSession.updateRenderState({ baseLayer: glLayer });
+
+    sending = true;
+    setStatus('dotSend', 'statusSend', 'ok pulse', '发送: 运行中');
+    document.getElementById('poseCard').classList.remove('hidden');
+    document.getElementById('statsCard').classList.remove('hidden');
+    document.getElementById('btnStartXR').classList.add('hidden');
+    document.getElementById('btnStopXR').classList.remove('hidden');
+
+    // 开始 Hz 计算
+    hzTimer = setInterval(() => {
+      document.getElementById('actualHz').textContent = `${hzCounter} Hz`;
+      hzCounter = 0;
+    }, 1000);
+
+    // 开始帧循环
+    xrSession.requestAnimationFrame(onXRFrame);
+
+    xrSession.addEventListener('end', () => {
+      log('WebXR 会话已结束');
+      cleanupXR();
+    });
+
+  } catch (e) {
+    log(`WebXR 启动失败: ${e.message}`, 'error');
+  }
+}
+
+function onXRFrame(time, frame) {
+  if (!xrSession || !sending) return;
+
+  // 获取头部姿态
+  const pose = frame.getViewerPose(refSpace);
+
+  if (pose) {
+    const p = pose.transform.position;
+    const q = pose.transform.orientation;
+
+    // 更新 UI
+    document.getElementById('px').textContent = p.x.toFixed(3);
+    document.getElementById('py').textContent = p.y.toFixed(3);
+    document.getElementById('pz').textContent = p.z.toFixed(3);
+    document.getElementById('qx').textContent = q.x.toFixed(3);
+    document.getElementById('qy').textContent = q.y.toFixed(3);
+    document.getElementById('qz').textContent = q.z.toFixed(3);
+    document.getElementById('qw').textContent = q.w.toFixed(3);
+
+    // 按频率发送
+    const now = performance.now();
+    if (now - lastSendTime >= sendInterval) {
+      lastSendTime = now;
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const msg = {
+          type: 'pose',
+          t: Date.now() / 1000,  // 时间戳（秒）
+          p: [
+            parseFloat(p.x.toFixed(4)),
+            parseFloat(p.y.toFixed(4)),
+            parseFloat(p.z.toFixed(4))
+          ],
+          q: [
+            parseFloat(q.x.toFixed(4)),
+            parseFloat(q.y.toFixed(4)),
+            parseFloat(q.z.toFixed(4)),
+            parseFloat(q.w.toFixed(4))
+          ]
+        };
+        ws.send(JSON.stringify(msg));
+
+        frameCounter++;
+        hzCounter++;
+        document.getElementById('frameCount').textContent = frameCounter;
+      }
+    }
+  }
+
+  // 继续下一帧
+  xrSession.requestAnimationFrame(onXRFrame);
+}
+
+function stopXR() {
+  if (xrSession) {
+    xrSession.end();
+  }
+}
+
+function cleanupXR() {
+  sending = false;
+  xrSession = null;
+  refSpace = null;
+  if (hzTimer) clearInterval(hzTimer);
+  setStatus('dotXr', 'statusXr', '', 'XR: 已停止');
+  setStatus('dotSend', 'statusSend', '', '发送: 停止');
+  document.getElementById('btnStartXR').classList.remove('hidden');
+  document.getElementById('btnStopXR').classList.add('hidden');
+}
+
+// ============================================
+// UI 辅助
+// ============================================
+function setStatus(dotId, textId, dotClass, text) {
+  const dot = document.getElementById(dotId);
+  dot.className = `dot ${dotClass}`;
+  document.getElementById(textId).textContent = text;
+}
+</script>
+
+</body>
+</html>

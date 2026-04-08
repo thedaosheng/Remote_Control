@@ -1,0 +1,1352 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebRTC 浏览器接收端测试</title>
+
+<!--
+  WebRTC 浏览器接收端测试页面
+  ============================
+
+  功能：
+    1. 通过 WebSocket 连接信令服务器，注册为 receiver
+    2. 自动发送 request_offer 请求发送端创建 offer
+    3. 收到 offer 后完成 WebRTC 握手（answer + ICE 交换）
+    4. 将收到的视频流渲染到 <video> 元素
+    5. 显示详细的诊断信息（连接状态、ICE 状态、帧计数、RTT 等）
+
+  信令协议：
+    - 注册:        {"type":"register","role":"receiver","ip":"test","name":"Browser-Test"}
+    - 请求 offer:  {"type":"request_offer"}
+    - offer:       {"type":"offer","sdp":"..."}
+    - answer:      {"type":"answer","sdp":"..."}
+    - ICE 候选:    {"type":"ice","sdpMLineIndex":0,"sdpMid":"0","candidate":"..."}
+    - ping:        收到后回复 {"type":"pong","sender_time":...,"seq":...}
+
+  作者: Claude Code
+  日期: 2026-04-05
+-->
+
+<style>
+  /* ============ 全局重置与颜色变量 ============ */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg:      #0a0a12;     /* 页面背景 */
+    --surface: #12121e;     /* 卡片/面板背景 */
+    --border:  #252538;     /* 边框 */
+    --text:    #dddde8;     /* 主文本 */
+    --dim:     #666678;     /* 辅助文本 */
+    --accent:  #55aaff;     /* 主色调（蓝色） */
+    --green:   #44ff88;     /* 成功/正常 */
+    --red:     #ff5555;     /* 错误/断开 */
+    --orange:  #ffaa44;     /* 警告/等待 */
+    --yellow:  #ffee66;     /* 特殊高亮 */
+  }
+
+  body {
+    font-family: -apple-system, 'SF Mono', 'Menlo', 'Consolas', monospace;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 24px 16px;
+  }
+
+  /* ============ 主容器与标题 ============ */
+  .container {
+    max-width: 800px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    font-size: 1.4rem;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    margin-bottom: 4px;
+  }
+
+  .subtitle {
+    color: var(--dim);
+    font-size: 0.78rem;
+    margin-bottom: 24px;
+  }
+
+  /* ============ 状态指示灯行 ============ */
+  .status-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-bottom: 20px;
+    font-size: 0.75rem;
+  }
+
+  .status-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* 圆形状态指示灯 */
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--red);     /* 默认红色（未连接） */
+    flex-shrink: 0;
+  }
+  .dot.ok    { background: var(--green); }   /* 连接成功/正常 */
+  .dot.warn  { background: var(--orange); }  /* 等待/正在连接 */
+  .dot.pulse {                                /* 呼吸动画 */
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.25; }
+  }
+
+  /* ============ 输入行（信令地址 + 按钮） ============ */
+  .input-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  input[type=text] {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.82rem;
+    padding: 10px 14px;
+    outline: none;
+  }
+  input[type=text]:focus { border-color: var(--accent); }
+
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.82rem;
+    padding: 10px 16px;
+    transition: background 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+  button:hover { background: #1e1e30; border-color: var(--accent); }
+  button:disabled { opacity: 0.35; cursor: default; }
+
+  /* 主按钮（蓝色高亮） */
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #000;
+    font-weight: 600;
+  }
+  .btn-primary:hover { background: #77bbff; border-color: #77bbff; }
+
+  /* 危险按钮（红色） */
+  .btn-danger {
+    border-color: var(--red);
+    color: var(--red);
+  }
+  .btn-danger:hover { background: #2a1520; }
+
+  /* ============ 视频播放器 ============ */
+  .video-wrapper {
+    position: relative;
+    width: 100%;
+    background: #000;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 16px;
+    /* 16:9 默认比例，视频加载后自适应 */
+    aspect-ratio: 16 / 9;
+  }
+
+  #videoPlayer {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+  }
+
+  /* 视频覆盖层（左上角显示帧率/分辨率） */
+  .video-overlay {
+    position: absolute;
+    top: 8px;
+    left: 10px;
+    background: rgba(0, 0, 0, 0.65);
+    color: var(--green);
+    font-size: 0.72rem;
+    padding: 4px 8px;
+    border-radius: 4px;
+    pointer-events: none;
+  }
+
+  /* 视频中心占位文字（无视频时显示） */
+  .video-placeholder {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--dim);
+    font-size: 0.85rem;
+    text-align: center;
+    pointer-events: none;
+  }
+
+  /* ============ 诊断信息网格 ============ */
+  .info-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .info-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 0.72rem;
+  }
+
+  .info-card .label {
+    color: var(--dim);
+    margin-bottom: 3px;
+  }
+
+  .info-card .value {
+    font-size: 0.88rem;
+    font-weight: 600;
+    word-break: break-all;
+  }
+
+  /* 不同状态的值颜色 */
+  .val-ok   { color: var(--green); }
+  .val-warn { color: var(--orange); }
+  .val-err  { color: var(--red); }
+  .val-dim  { color: var(--dim); }
+
+  /* ============ 日志面板 ============ */
+  .log-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+
+  .log-header h3 {
+    font-size: 0.82rem;
+    font-weight: 600;
+  }
+
+  .log-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    height: 280px;
+    overflow-y: auto;
+    padding: 10px 12px;
+    font-size: 0.72rem;
+    line-height: 1.65;
+  }
+
+  .log-line     { margin-bottom: 1px; }
+  .log-ok       { color: var(--green); }
+  .log-err      { color: var(--red); }
+  .log-warn     { color: var(--orange); }
+  .log-dim      { color: var(--dim); }
+  .log-info     { color: var(--accent); }
+</style>
+</head>
+
+<body>
+<div class="container">
+
+  <!-- ======== 标题 ======== -->
+  <h1>WebRTC 浏览器接收端测试</h1>
+  <p class="subtitle">信令协议兼容 · 诊断信息 · 极简测试页面</p>
+
+  <!-- ======== 状态指示灯 ======== -->
+  <div class="status-row">
+    <div class="status-item">
+      <div class="dot" id="dotWs"></div>
+      <span id="lblWs">信令未连接</span>
+    </div>
+    <div class="status-item">
+      <div class="dot" id="dotIce"></div>
+      <span id="lblIce">ICE 未启动</span>
+    </div>
+    <div class="status-item">
+      <div class="dot" id="dotDtls"></div>
+      <span id="lblDtls">DTLS 未启动</span>
+    </div>
+    <div class="status-item">
+      <div class="dot" id="dotVideo"></div>
+      <span id="lblVideo">无视频</span>
+    </div>
+  </div>
+
+  <!-- ======== 信令服务器地址 + 连接/断开 ======== -->
+  <div class="input-row">
+    <input type="text" id="wsUrl" value="ws://39.102.113.104:8765"
+           placeholder="ws://信令服务器:端口">
+    <button class="btn-primary" id="btnConnect" onclick="doConnect()">连接</button>
+    <button class="btn-danger" id="btnDisconnect" onclick="doDisconnect()" disabled>断开</button>
+  </div>
+
+  <!-- ======== 手动操作按钮 ======== -->
+  <div class="input-row">
+    <button id="btnRequestOffer" onclick="sendRequestOffer()" disabled>手动 request_offer</button>
+    <button id="btnResetPc" onclick="resetPeerConnection()" disabled>重置 PeerConnection</button>
+  </div>
+
+  <!-- ======== 视频播放区域 ======== -->
+  <div class="video-wrapper" id="videoWrapper">
+    <video id="videoPlayer" autoplay muted playsinline></video>
+    <div class="video-overlay" id="videoOverlay" style="display:none;">
+      <span id="overlayText">--</span>
+    </div>
+    <div class="video-placeholder" id="videoPlaceholder">
+      等待视频流...
+    </div>
+  </div>
+
+  <!-- ======== 诊断信息卡片 ======== -->
+  <div class="info-grid">
+    <div class="info-card">
+      <div class="label">视频分辨率</div>
+      <div class="value" id="infoRes">--</div>
+    </div>
+    <div class="info-card">
+      <div class="label">连接状态</div>
+      <div class="value" id="infoConnState">--</div>
+    </div>
+    <div class="info-card">
+      <div class="label">ICE 状态</div>
+      <div class="value" id="infoIceState">--</div>
+    </div>
+    <div class="info-card">
+      <div class="label">DTLS 状态</div>
+      <div class="value" id="infoDtlsState">--</div>
+    </div>
+    <div class="info-card">
+      <div class="label">ICE 候选对</div>
+      <div class="value" id="infoIcePair">--</div>
+    </div>
+    <div class="info-card">
+      <div class="label">收到帧数</div>
+      <div class="value" id="infoFrames">0</div>
+    </div>
+    <div class="info-card">
+      <div class="label">帧率 (FPS)</div>
+      <div class="value" id="infoFps">--</div>
+    </div>
+    <div class="info-card">
+      <div class="label">信令 RTT</div>
+      <div class="value" id="infoRtt">--</div>
+    </div>
+    <div class="info-card">
+      <div class="label">本地 ICE 候选</div>
+      <div class="value" id="infoLocalIce">0</div>
+    </div>
+    <div class="info-card">
+      <div class="label">远端 ICE 候选</div>
+      <div class="value" id="infoRemoteIce">0</div>
+    </div>
+    <div class="info-card">
+      <div class="label">视频编码</div>
+      <div class="value" id="infoCodec">--</div>
+    </div>
+    <div class="info-card">
+      <div class="label">接收比特率</div>
+      <div class="value" id="infoBitrate">--</div>
+    </div>
+  </div>
+
+  <!-- ======== 日志面板 ======== -->
+  <div class="log-header">
+    <h3>事件日志</h3>
+    <button onclick="clearLog()" style="font-size:0.7rem; padding:4px 10px;">清空</button>
+  </div>
+  <div class="log-panel" id="logPanel"></div>
+
+</div>
+
+<script>
+"use strict";
+
+// ================================================================
+//  全局变量
+// ================================================================
+
+/** @type {WebSocket|null} 信令服务器连接 */
+let ws = null;
+
+/** @type {RTCPeerConnection|null} WebRTC 对等连接 */
+let pc = null;
+
+/** 帧计数器（通过 requestVideoFrameCallback 累加） */
+let frameCount = 0;
+
+/** 上次帧率计算时的帧数 */
+let lastFrameCount = 0;
+
+/** 上次帧率计算的时间戳 (ms) */
+let lastFpsTime = 0;
+
+/** 本地生成的 ICE 候选数量 */
+let localIceCount = 0;
+
+/** 收到远端的 ICE 候选数量 */
+let remoteIceCount = 0;
+
+/** 信令 ping 序号 */
+let pingSeq = 0;
+
+/** 信令 RTT 样本列表 (ms) */
+let rttSamples = [];
+
+/** 上次 getStats 收到的字节数，用于计算比特率 */
+let lastBytesReceived = 0;
+
+/** 上次 getStats 的时间 */
+let lastStatsTime = 0;
+
+/** 定时器ID：帧率统计 */
+let fpsTimerId = null;
+
+/** 定时器ID：getStats 统计 */
+let statsTimerId = null;
+
+/** 定时器ID：ping */
+let pingTimerId = null;
+
+/** 视频是否已经开始播放（用于隐藏占位文字） */
+let videoStarted = false;
+
+
+// ================================================================
+//  日志工具
+// ================================================================
+
+/**
+ * 向日志面板和 console 输出一条日志
+ * @param {string} text  - 日志内容
+ * @param {string} [cls] - 样式类名: 'ok' | 'err' | 'warn' | 'dim' | 'info'
+ */
+function log(text, cls) {
+  const panel = document.getElementById('logPanel');
+  const line = document.createElement('div');
+  line.className = 'log-line' + (cls ? ' log-' + cls : '');
+
+  // 格式化时间戳 HH:MM:SS.mmm
+  const now = new Date();
+  const ts = now.getHours().toString().padStart(2, '0') + ':' +
+             now.getMinutes().toString().padStart(2, '0') + ':' +
+             now.getSeconds().toString().padStart(2, '0') + '.' +
+             now.getMilliseconds().toString().padStart(3, '0');
+
+  line.textContent = '[' + ts + '] ' + text;
+  panel.appendChild(line);
+
+  // 自动滚动到底部
+  panel.scrollTop = panel.scrollHeight;
+
+  // 同步到浏览器 console
+  console.log('[WebRTC-Test]', text);
+}
+
+/** 清空日志面板 */
+function clearLog() {
+  document.getElementById('logPanel').innerHTML = '';
+}
+
+
+// ================================================================
+//  状态指示灯更新辅助函数
+// ================================================================
+
+/**
+ * 设置某个状态灯的样式
+ * @param {string} dotId   - dot 元素的 id
+ * @param {string} state   - 'ok' | 'warn' | 'err' | 'pulse' | ''
+ */
+function setDot(dotId, state) {
+  const el = document.getElementById(dotId);
+  el.className = 'dot' + (state ? ' ' + state : '');
+}
+
+/**
+ * 设置某个标签的文本
+ * @param {string} labelId - label 元素的 id
+ * @param {string} text    - 要显示的文本
+ */
+function setLabel(labelId, text) {
+  document.getElementById(labelId).textContent = text;
+}
+
+/**
+ * 更新诊断信息卡片的值
+ * @param {string} id    - value 元素的 id
+ * @param {string} text  - 显示的值
+ * @param {string} [cls] - 可选的样式类: 'val-ok' | 'val-warn' | 'val-err' | 'val-dim'
+ */
+function setInfo(id, text, cls) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  // 清除之前的 val-* 类名
+  el.className = 'value' + (cls ? ' ' + cls : '');
+}
+
+
+// ================================================================
+//  ICE 服务器配置
+// ================================================================
+
+/**
+ * 构造 RTCConfiguration（ICE 服务器列表）
+ * 包含 Google STUN + 自建 TURN（UDP + TCP）
+ */
+function makeRtcConfig() {
+  return {
+    iceServers: [
+      {
+        // Google 公共 STUN 服务器（获取本机公网 IP 映射）
+        urls: 'stun:stun.l.google.com:19302'
+      },
+      {
+        // 自建 TURN 服务器（NAT 穿透失败时中继数据）
+        // 同时提供 UDP 和 TCP 传输，确保在严格防火墙环境下也能连通
+        urls: [
+          'turn:39.102.113.104:3478',
+          'turn:39.102.113.104:3478?transport=tcp'
+        ],
+        username:   'remote',
+        credential: 'Wawjxyz3!'
+      }
+    ],
+    // 使用 all 策略：优先 P2P 直连，失败后退回 TURN 中继
+    iceTransportPolicy: 'all'
+  };
+}
+
+
+// ================================================================
+//  WebSocket 信令连接
+// ================================================================
+
+/**
+ * 点击"连接"按钮的处理函数
+ * 建立 WebSocket 连接 → 注册为 receiver → 自动发送 request_offer
+ */
+function doConnect() {
+  const url = document.getElementById('wsUrl').value.trim();
+  if (!url) {
+    log('请输入信令服务器地址', 'err');
+    return;
+  }
+
+  log('正在连接信令服务器: ' + url);
+  setDot('dotWs', 'pulse');
+  setLabel('lblWs', '连接中...');
+
+  try {
+    ws = new WebSocket(url);
+  } catch (e) {
+    log('WebSocket 创建失败: ' + e.message, 'err');
+    setDot('dotWs', '');
+    setLabel('lblWs', '创建失败');
+    return;
+  }
+
+  // ---- WebSocket 连接成功 ----
+  ws.onopen = function () {
+    log('信令服务器连接成功', 'ok');
+    setDot('dotWs', 'ok');
+    setLabel('lblWs', '已连接');
+
+    // 更新按钮状态
+    document.getElementById('btnConnect').disabled = true;
+    document.getElementById('btnDisconnect').disabled = false;
+    document.getElementById('btnRequestOffer').disabled = false;
+    document.getElementById('btnResetPc').disabled = false;
+
+    // 步骤1: 注册为 receiver
+    var registerMsg = {
+      type: 'register',
+      role: 'receiver',
+      ip:   'test',
+      name: 'Browser-Test'
+    };
+    ws.send(JSON.stringify(registerMsg));
+    log('已发送注册消息: role=receiver, name=Browser-Test', 'ok');
+
+    // 步骤2: 短暂延迟后发送 request_offer（给服务器一点时间处理注册）
+    setTimeout(function () {
+      sendRequestOffer();
+    }, 500);
+
+    // 步骤3: 启动 ping 定时器（每 5 秒发一次 ping 测量信令延迟）
+    startPingLoop();
+  };
+
+  // ---- WebSocket 连接关闭 ----
+  ws.onclose = function (evt) {
+    log('信令连接已关闭 (code=' + evt.code + ')', 'warn');
+    setDot('dotWs', '');
+    setLabel('lblWs', '已断开');
+    onWsDisconnected();
+  };
+
+  // ---- WebSocket 错误 ----
+  ws.onerror = function () {
+    log('信令连接出错', 'err');
+    setDot('dotWs', '');
+    setLabel('lblWs', '连接错误');
+  };
+
+  // ---- 收到信令消息 ----
+  ws.onmessage = function (evt) {
+    var data;
+    try {
+      data = JSON.parse(evt.data);
+    } catch (e) {
+      log('收到非 JSON 消息: ' + evt.data.substring(0, 100), 'warn');
+      return;
+    }
+
+    var msgType = data.type || '';
+
+    // 根据消息类型分发处理
+    switch (msgType) {
+
+      case 'offer':
+        // 收到发送端的 SDP Offer
+        log('收到 Offer (SDP ' + (data.sdp || '').length + ' chars)', 'ok');
+        handleOffer(data);
+        break;
+
+      case 'ice':
+        // 收到远端 ICE 候选
+        handleRemoteIce(data);
+        break;
+
+      case 'ping':
+        // 收到发送端的 ping，回复 pong（携带原始时间戳和序号）
+        handlePing(data);
+        break;
+
+      case 'pong':
+        // 收到信令服务器返回的 pong
+        handlePong(data);
+        break;
+
+      case 'heartbeat':
+        // 信令服务器心跳，回复 heartbeat_ack
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'heartbeat_ack' }));
+        }
+        break;
+
+      case 'heartbeat_ack':
+        // 忽略心跳确认
+        break;
+
+      default:
+        // 其他消息类型，打印到日志
+        log('收到未知消息: type=' + msgType + ' ' + JSON.stringify(data).substring(0, 120), 'dim');
+        break;
+    }
+  };
+}
+
+
+/**
+ * 点击"断开"按钮的处理函数
+ */
+function doDisconnect() {
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
+  // 同时关闭 PeerConnection
+  closePeerConnection();
+  onWsDisconnected();
+}
+
+
+/**
+ * WebSocket 断开后的清理：重置按钮和定时器
+ */
+function onWsDisconnected() {
+  document.getElementById('btnConnect').disabled = false;
+  document.getElementById('btnDisconnect').disabled = true;
+  document.getElementById('btnRequestOffer').disabled = true;
+  document.getElementById('btnResetPc').disabled = true;
+  ws = null;
+  stopPingLoop();
+}
+
+
+// ================================================================
+//  信令消息发送
+// ================================================================
+
+/**
+ * 发送 request_offer 消息，让发送端创建一个新的 offer
+ */
+function sendRequestOffer() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    log('无法发送 request_offer: 信令未连接', 'err');
+    return;
+  }
+  ws.send(JSON.stringify({ type: 'request_offer' }));
+  log('已发送 request_offer', 'info');
+}
+
+
+// ================================================================
+//  Ping / Pong 延迟测量
+// ================================================================
+
+/** 启动 ping 循环（每 5 秒一次） */
+function startPingLoop() {
+  stopPingLoop();
+  pingTimerId = setInterval(function () {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      pingSeq++;
+      ws.send(JSON.stringify({
+        type:        'ping',
+        sender_time: Date.now() / 1000,    // 秒级时间戳（与发送端协议一致）
+        seq:         pingSeq
+      }));
+    }
+  }, 5000);
+}
+
+/** 停止 ping 循环 */
+function stopPingLoop() {
+  if (pingTimerId) {
+    clearInterval(pingTimerId);
+    pingTimerId = null;
+  }
+}
+
+/**
+ * 处理收到的 ping 消息（发送端发来的，需要回复 pong）
+ * @param {Object} data - { type:"ping", sender_time:..., seq:... }
+ */
+function handlePing(data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type:        'pong',
+      sender_time: data.sender_time,
+      seq:         data.seq
+    }));
+  }
+}
+
+/**
+ * 处理收到的 pong 消息（自己 ping 的回复）
+ * @param {Object} data - { type:"pong", sender_time:..., seq:... }
+ */
+function handlePong(data) {
+  var now = Date.now() / 1000;
+  var senderTime = data.sender_time || 0;
+  var rtt = (now - senderTime) * 1000;   // 转为毫秒
+
+  // 只记录合理范围内的 RTT（< 10 秒），避免时钟偏差的异常值
+  if (rtt > 0 && rtt < 10000) {
+    rttSamples.push(rtt);
+    // 保留最近 20 个样本
+    if (rttSamples.length > 20) {
+      rttSamples = rttSamples.slice(-20);
+    }
+    var avg = rttSamples.reduce(function (a, b) { return a + b; }, 0) / rttSamples.length;
+    setInfo('infoRtt', rtt.toFixed(0) + ' ms (avg ' + avg.toFixed(0) + ')');
+  }
+}
+
+
+// ================================================================
+//  WebRTC: 处理 Offer，创建 Answer
+// ================================================================
+
+/**
+ * 收到发送端的 SDP Offer 后的完整处理流程：
+ *   1. 关闭旧的 PeerConnection（如果存在）
+ *   2. 创建新的 RTCPeerConnection
+ *   3. 设置 remote description (offer)
+ *   4. 创建 answer
+ *   5. 设置 local description (answer)
+ *   6. 把 answer 通过信令发回发送端
+ *
+ * @param {Object} data - { type:"offer", sdp:"..." }
+ */
+async function handleOffer(data) {
+  try {
+    log('开始 WebRTC 握手...', 'info');
+
+    // 如果之前有旧的连接，先关闭
+    closePeerConnection();
+
+    // 重置计数器
+    localIceCount = 0;
+    remoteIceCount = 0;
+    setInfo('infoLocalIce', '0');
+    setInfo('infoRemoteIce', '0');
+
+    // 创建新的 PeerConnection
+    pc = new RTCPeerConnection(makeRtcConfig());
+    log('RTCPeerConnection 已创建（STUN + TURN）', 'ok');
+
+    // ---- 监听 ICE 候选生成事件 ----
+    // 当浏览器发现一个新的 ICE 候选（本地网卡地址 / STUN 映射 / TURN 中继）时触发
+    pc.onicecandidate = function (evt) {
+      if (evt.candidate) {
+        localIceCount++;
+        setInfo('infoLocalIce', '' + localIceCount);
+
+        // 通过信令服务器转发给发送端
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type:          'ice',
+            sdpMLineIndex: evt.candidate.sdpMLineIndex,
+            sdpMid:        evt.candidate.sdpMid,
+            candidate:     evt.candidate.candidate
+          }));
+        }
+
+        // 仅在前几个候选时打日志，避免刷屏
+        if (localIceCount <= 5) {
+          log('本地 ICE 候选 #' + localIceCount + ': ' +
+              evt.candidate.candidate.substring(0, 80), 'dim');
+        } else if (localIceCount === 6) {
+          log('后续 ICE 候选省略显示...', 'dim');
+        }
+      } else {
+        // candidate 为 null 表示 ICE 候选收集完毕
+        log('ICE 候选收集完毕（共 ' + localIceCount + ' 个）', 'info');
+      }
+    };
+
+    // ---- 监听 ICE 连接状态变化 ----
+    pc.oniceconnectionstatechange = function () {
+      var state = pc.iceConnectionState;
+      log('ICE 连接状态: ' + state, getStateLogClass(state));
+      setInfo('infoIceState', state, getStateValClass(state));
+      updateIceDot(state);
+    };
+
+    // ---- 监听 ICE 候选收集状态 ----
+    pc.onicegatheringstatechange = function () {
+      log('ICE 收集状态: ' + pc.iceGatheringState, 'dim');
+    };
+
+    // ---- 监听整体连接状态 ----
+    pc.onconnectionstatechange = function () {
+      var state = pc.connectionState;
+      log('连接状态: ' + state, getStateLogClass(state));
+      setInfo('infoConnState', state, getStateValClass(state));
+
+      if (state === 'connected') {
+        log('WebRTC 连接已建立！', 'ok');
+        // 启动 getStats 统计
+        startStatsLoop();
+      } else if (state === 'failed') {
+        log('WebRTC 连接失败！可能是 ICE/DTLS 握手超时', 'err');
+      } else if (state === 'disconnected') {
+        log('WebRTC 连接中断，可能需要重连', 'warn');
+      }
+    };
+
+    // ---- 监听远端轨道（收到视频时触发） ----
+    pc.ontrack = function (evt) {
+      log('收到远端轨道: kind=' + evt.track.kind, 'ok');
+
+      if (evt.track.kind === 'video') {
+        var videoEl = document.getElementById('videoPlayer');
+
+        // 将 MediaStream 绑定到 <video> 元素
+        if (evt.streams && evt.streams.length > 0) {
+          videoEl.srcObject = evt.streams[0];
+        } else {
+          // 如果没有 streams，手动创建一个
+          var stream = new MediaStream();
+          stream.addTrack(evt.track);
+          videoEl.srcObject = stream;
+        }
+
+        log('视频流已绑定到播放器', 'ok');
+
+        // 视频元数据加载后更新分辨率显示
+        videoEl.onloadedmetadata = function () {
+          var w = videoEl.videoWidth;
+          var h = videoEl.videoHeight;
+          setInfo('infoRes', w + ' x ' + h, 'val-ok');
+          log('视频分辨率: ' + w + 'x' + h, 'ok');
+
+          // 隐藏占位文字，显示覆盖层
+          document.getElementById('videoPlaceholder').style.display = 'none';
+          document.getElementById('videoOverlay').style.display = 'block';
+          videoStarted = true;
+
+          // 启动帧计数（使用 requestVideoFrameCallback）
+          startFrameCounter(videoEl);
+        };
+
+        // 监听 video 的 playing 事件
+        videoEl.onplaying = function () {
+          setDot('dotVideo', 'ok');
+          setLabel('lblVideo', '视频播放中');
+          log('视频开始播放', 'ok');
+        };
+      }
+    };
+
+    // ---- 设置 remote description (offer) ----
+    var offerDesc = new RTCSessionDescription({
+      type: 'offer',
+      sdp:  data.sdp
+    });
+    await pc.setRemoteDescription(offerDesc);
+    log('Remote Description (Offer) 已设置', 'ok');
+
+    // ---- 创建 answer ----
+    var answer = await pc.createAnswer();
+    log('Answer 已创建 (SDP ' + answer.sdp.length + ' chars)', 'ok');
+
+    // ---- 设置 local description (answer) ----
+    await pc.setLocalDescription(answer);
+    log('Local Description (Answer) 已设置', 'ok');
+
+    // ---- 将 answer 发回信令服务器 ----
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'answer',
+        sdp:  answer.sdp
+      }));
+      log('Answer 已发送到信令服务器', 'ok');
+    } else {
+      log('无法发送 Answer: 信令已断开', 'err');
+    }
+
+    // ---- 尝试获取 DTLS 状态（部分浏览器支持） ----
+    monitorDtlsState();
+
+  } catch (e) {
+    log('handleOffer 异常: ' + e.message, 'err');
+    console.error(e);
+  }
+}
+
+
+// ================================================================
+//  WebRTC: 处理远端 ICE 候选
+// ================================================================
+
+/**
+ * 收到信令转发的远端 ICE 候选，添加到 PeerConnection
+ * @param {Object} data - { type:"ice", sdpMLineIndex:0, sdpMid:"0", candidate:"..." }
+ */
+async function handleRemoteIce(data) {
+  if (!pc) {
+    log('收到 ICE 候选但 PeerConnection 不存在，忽略', 'warn');
+    return;
+  }
+
+  if (!data.candidate) {
+    // 空候选表示对端 ICE 收集完毕
+    log('远端 ICE 候选收集完毕信号', 'dim');
+    return;
+  }
+
+  try {
+    await pc.addIceCandidate(new RTCIceCandidate({
+      sdpMLineIndex: data.sdpMLineIndex,
+      sdpMid:        data.sdpMid,
+      candidate:     data.candidate
+    }));
+
+    remoteIceCount++;
+    setInfo('infoRemoteIce', '' + remoteIceCount);
+
+    if (remoteIceCount <= 5) {
+      log('远端 ICE 候选 #' + remoteIceCount + ': ' +
+          data.candidate.substring(0, 80), 'dim');
+    } else if (remoteIceCount === 6) {
+      log('后续远端 ICE 候选省略显示...', 'dim');
+    }
+  } catch (e) {
+    log('添加远端 ICE 候选失败: ' + e.message, 'warn');
+  }
+}
+
+
+// ================================================================
+//  PeerConnection 管理
+// ================================================================
+
+/**
+ * 关闭当前的 PeerConnection 并清理资源
+ */
+function closePeerConnection() {
+  if (pc) {
+    pc.close();
+    pc = null;
+    log('PeerConnection 已关闭', 'dim');
+  }
+
+  // 重置状态指示灯
+  setDot('dotIce', '');
+  setLabel('lblIce', 'ICE 未启动');
+  setDot('dotDtls', '');
+  setLabel('lblDtls', 'DTLS 未启动');
+  setDot('dotVideo', '');
+  setLabel('lblVideo', '无视频');
+
+  // 重置诊断信息
+  setInfo('infoConnState', '--');
+  setInfo('infoIceState', '--');
+  setInfo('infoDtlsState', '--');
+  setInfo('infoIcePair', '--');
+
+  // 停止 stats 统计
+  stopStatsLoop();
+
+  // 重置视频显示
+  var videoEl = document.getElementById('videoPlayer');
+  videoEl.srcObject = null;
+  document.getElementById('videoPlaceholder').style.display = 'block';
+  document.getElementById('videoOverlay').style.display = 'none';
+  videoStarted = false;
+  frameCount = 0;
+  lastFrameCount = 0;
+}
+
+/**
+ * 手动重置 PeerConnection 并重新请求 offer
+ */
+function resetPeerConnection() {
+  log('手动重置 PeerConnection', 'warn');
+  closePeerConnection();
+  // 短暂延迟后请求新的 offer
+  setTimeout(function () {
+    sendRequestOffer();
+  }, 300);
+}
+
+
+// ================================================================
+//  DTLS 状态监控
+// ================================================================
+
+/**
+ * 定期检查 DTLS transport 状态
+ * RTCPeerConnection 并不直接暴露 dtlsTransport.state 事件，
+ * 所以通过 getSenders/getReceivers 的 transport 属性获取
+ */
+function monitorDtlsState() {
+  // 每 500ms 检查一次，最多检查 60 次（30 秒）
+  var checkCount = 0;
+  var dtlsTimerId = setInterval(function () {
+    checkCount++;
+    if (checkCount > 60 || !pc) {
+      clearInterval(dtlsTimerId);
+      return;
+    }
+
+    try {
+      // 尝试从 receiver 的 transport 获取 DTLS 状态
+      var receivers = pc.getReceivers();
+      for (var i = 0; i < receivers.length; i++) {
+        var transport = receivers[i].transport;
+        if (transport && transport.state) {
+          var dtlsState = transport.state;
+          setInfo('infoDtlsState', dtlsState, getStateValClass(dtlsState));
+
+          if (dtlsState === 'connected') {
+            setDot('dotDtls', 'ok');
+            setLabel('lblDtls', 'DTLS 已连接');
+            log('DTLS 连接已建立', 'ok');
+            clearInterval(dtlsTimerId);
+          } else if (dtlsState === 'connecting') {
+            setDot('dotDtls', 'pulse');
+            setLabel('lblDtls', 'DTLS 握手中');
+          } else if (dtlsState === 'failed' || dtlsState === 'closed') {
+            setDot('dotDtls', '');
+            setLabel('lblDtls', 'DTLS ' + dtlsState);
+            clearInterval(dtlsTimerId);
+          }
+          return;   // 找到了就不继续遍历
+        }
+      }
+    } catch (e) {
+      // 部分浏览器不支持 transport 属性，静默忽略
+    }
+  }, 500);
+}
+
+
+// ================================================================
+//  帧计数器（使用 requestVideoFrameCallback）
+// ================================================================
+
+/**
+ * 启动帧计数：每收到一帧视频递增 frameCount
+ * 配合 FPS 定时器计算帧率
+ * @param {HTMLVideoElement} videoEl - video 元素
+ */
+function startFrameCounter(videoEl) {
+  // requestVideoFrameCallback 是更精确的 API（Chrome 83+, Safari 15.4+）
+  if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+    function onFrame(now, metadata) {
+      frameCount++;
+      setInfo('infoFrames', '' + frameCount);
+
+      // 更新覆盖层文本
+      if (videoStarted) {
+        var fpsText = document.getElementById('infoFps').textContent;
+        document.getElementById('overlayText').textContent =
+          videoEl.videoWidth + 'x' + videoEl.videoHeight + ' | ' + fpsText;
+      }
+
+      // 继续监听下一帧
+      videoEl.requestVideoFrameCallback(onFrame);
+    }
+    videoEl.requestVideoFrameCallback(onFrame);
+    log('帧计数器已启动 (requestVideoFrameCallback)', 'dim');
+  } else {
+    // 降级：使用定时器估算
+    log('浏览器不支持 requestVideoFrameCallback，使用定时器估算', 'warn');
+    setInterval(function () {
+      // 简单计数：检测 video.currentTime 是否变化
+      frameCount++;
+      setInfo('infoFrames', '~' + frameCount);
+    }, 33);   // 约 30fps
+  }
+
+  // 启动 FPS 计算定时器（每秒一次）
+  startFpsTimer();
+}
+
+/** 每秒计算一次帧率 */
+function startFpsTimer() {
+  if (fpsTimerId) clearInterval(fpsTimerId);
+
+  lastFrameCount = frameCount;
+  lastFpsTime = performance.now();
+
+  fpsTimerId = setInterval(function () {
+    var now = performance.now();
+    var elapsed = (now - lastFpsTime) / 1000;   // 转为秒
+    var frames = frameCount - lastFrameCount;
+    var fps = elapsed > 0 ? (frames / elapsed) : 0;
+
+    setInfo('infoFps', fps.toFixed(1) + ' fps',
+            fps > 20 ? 'val-ok' : fps > 5 ? 'val-warn' : 'val-err');
+
+    // 更新覆盖层
+    if (videoStarted) {
+      var videoEl = document.getElementById('videoPlayer');
+      document.getElementById('overlayText').textContent =
+        videoEl.videoWidth + 'x' + videoEl.videoHeight + ' | ' + fps.toFixed(1) + ' fps';
+    }
+
+    lastFrameCount = frameCount;
+    lastFpsTime = now;
+  }, 1000);
+}
+
+
+// ================================================================
+//  getStats 统计（编码格式、比特率、ICE 候选对）
+// ================================================================
+
+/** 启动 getStats 统计循环（每 2 秒一次） */
+function startStatsLoop() {
+  stopStatsLoop();
+  lastBytesReceived = 0;
+  lastStatsTime = performance.now();
+
+  statsTimerId = setInterval(function () {
+    if (!pc) return;
+
+    pc.getStats().then(function (stats) {
+      stats.forEach(function (report) {
+
+        // ---- 入站视频流统计 ----
+        if (report.type === 'inbound-rtp' && report.kind === 'video') {
+          // 计算比特率
+          var now = performance.now();
+          var bytes = report.bytesReceived || 0;
+          var elapsed = (now - lastStatsTime) / 1000;
+
+          if (lastBytesReceived > 0 && elapsed > 0) {
+            var bitrate = ((bytes - lastBytesReceived) * 8) / elapsed;  // bits/s
+            var display;
+            if (bitrate > 1000000) {
+              display = (bitrate / 1000000).toFixed(2) + ' Mbps';
+            } else if (bitrate > 1000) {
+              display = (bitrate / 1000).toFixed(0) + ' kbps';
+            } else {
+              display = bitrate.toFixed(0) + ' bps';
+            }
+            setInfo('infoBitrate', display, 'val-ok');
+          }
+
+          lastBytesReceived = bytes;
+          lastStatsTime = now;
+
+          // 获取编码格式
+          if (report.codecId) {
+            stats.forEach(function (codecReport) {
+              if (codecReport.id === report.codecId && codecReport.type === 'codec') {
+                var codec = codecReport.mimeType || '--';
+                setInfo('infoCodec', codec, 'val-ok');
+              }
+            });
+          }
+        }
+
+        // ---- 候选对统计（当前使用的 ICE 连接路径） ----
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+          var localId = report.localCandidateId;
+          var remoteId = report.remoteCandidateId;
+          var localDesc = '';
+          var remoteDesc = '';
+
+          // 查找本地候选的地址
+          stats.forEach(function (r) {
+            if (r.id === localId) {
+              localDesc = (r.candidateType || '?') + ' ' + (r.address || r.ip || '?') + ':' + (r.port || '?');
+            }
+            if (r.id === remoteId) {
+              remoteDesc = (r.candidateType || '?') + ' ' + (r.address || r.ip || '?') + ':' + (r.port || '?');
+            }
+          });
+
+          if (localDesc || remoteDesc) {
+            setInfo('infoIcePair', localDesc + ' <-> ' + remoteDesc, 'val-ok');
+          }
+        }
+      });
+    }).catch(function () {
+      // getStats 可能在连接关闭后抛异常，静默处理
+    });
+  }, 2000);
+}
+
+/** 停止 getStats 统计循环 */
+function stopStatsLoop() {
+  if (statsTimerId) {
+    clearInterval(statsTimerId);
+    statsTimerId = null;
+  }
+}
+
+
+// ================================================================
+//  辅助函数：状态值 → 样式类映射
+// ================================================================
+
+/**
+ * 将 ICE/连接/DTLS 状态映射为日志样式类
+ * @param {string} state - 'new' | 'checking' | 'connected' | 'completed' | 'failed' | 'disconnected' | 'closed'
+ * @returns {string} 日志样式类
+ */
+function getStateLogClass(state) {
+  switch (state) {
+    case 'connected':
+    case 'completed':
+      return 'ok';
+    case 'failed':
+    case 'closed':
+      return 'err';
+    case 'checking':
+    case 'connecting':
+    case 'new':
+      return 'info';
+    case 'disconnected':
+      return 'warn';
+    default:
+      return 'dim';
+  }
+}
+
+/**
+ * 将 ICE/连接/DTLS 状态映射为信息卡片值的样式类
+ * @param {string} state
+ * @returns {string}
+ */
+function getStateValClass(state) {
+  switch (state) {
+    case 'connected':
+    case 'completed':
+      return 'val-ok';
+    case 'failed':
+    case 'closed':
+      return 'val-err';
+    case 'checking':
+    case 'connecting':
+    case 'new':
+      return 'val-warn';
+    case 'disconnected':
+      return 'val-warn';
+    default:
+      return 'val-dim';
+  }
+}
+
+/**
+ * 根据 ICE 连接状态更新指示灯
+ * @param {string} state - iceConnectionState 值
+ */
+function updateIceDot(state) {
+  switch (state) {
+    case 'connected':
+    case 'completed':
+      setDot('dotIce', 'ok');
+      setLabel('lblIce', 'ICE 已连接');
+      break;
+    case 'checking':
+      setDot('dotIce', 'pulse');
+      setLabel('lblIce', 'ICE 协商中');
+      break;
+    case 'failed':
+      setDot('dotIce', '');
+      setLabel('lblIce', 'ICE 失败');
+      break;
+    case 'disconnected':
+      setDot('dotIce', 'warn');
+      setLabel('lblIce', 'ICE 断开');
+      break;
+    case 'closed':
+      setDot('dotIce', '');
+      setLabel('lblIce', 'ICE 已关闭');
+      break;
+    default:
+      setDot('dotIce', 'warn');
+      setLabel('lblIce', 'ICE ' + state);
+      break;
+  }
+}
+
+
+// ================================================================
+//  页面加载初始化
+// ================================================================
+log('页面已加载，等待连接信令服务器', 'dim');
+log('ICE 配置: STUN (Google) + TURN (39.102.113.104:3478)', 'dim');
+
+</script>
+</body>
+</html>

@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZED Mini 双目接收端 - Vision Pro</title>
+
+<!--
+  ZED Mini 双目 WebRTC 接收端 (Apple Vision Pro)
+  ================================================
+
+  功能:
+    1. 通过 WebSocket 连接信令服务器，接收 WebRTC 视频流
+    2. ZED Mini 发送的是 side-by-side 画面（左眼在左半，右眼在右半）
+    3. 进入 WebXR immersive-vr 模式后，用 WebGL 分眼渲染：
+       - 左眼 viewport → 视频纹理的左半部分 (UV x: 0.0 ~ 0.5)
+       - 右眼 viewport → 视频纹理的右半部分 (UV x: 0.5 ~ 1.0)
+    4. 效果：Vision Pro 左眼看到左侧视角，右眼看到右侧视角，产生立体临场感
+
+  使用方法:
+    1. 用 Safari 在 Vision Pro 上打开此页面（需要 HTTPS 或本地 HTTP）
+    2. 先点击"连接信令服务器"
+    3. 再点击"进入立体视图"进入沉浸模式
+    4. 如 Safari 提示 WebXR 不可用，进入：
+       设置 → Apps → Safari → Advanced → Feature Flags → WebXR Device API → 启用
+
+  兼容性:
+    - 必须在 Apple Vision Pro 的 Safari 上运行
+    - WebXR immersive-vr 仅 Vision Pro Safari 支持
+    - 其他浏览器（Chrome/Firefox）会退出到普通全屏模式作为降级方案
+
+  信令服务器协议（与现有服务器兼容）:
+    - 注册: {"type":"register","role":"receiver"}
+    - 收到 offer → 创建 answer → 双向交换 ICE 候选
+-->
+
+<style>
+  /* ============ 全局重置与变量 ============ */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg:      #09090f;
+    --surface: #13131e;
+    --border:  #252535;
+    --text:    #dddde8;
+    --dim:     #666678;
+    --accent:  #55aaff;
+    --green:   #44ff88;
+    --red:     #ff5555;
+    --orange:  #ffaa44;
+  }
+
+  body {
+    font-family: -apple-system, 'SF Mono', 'DM Mono', monospace;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 20px;
+  }
+
+  /* ============ 布局 ============ */
+  .container { max-width: 640px; width: 100%; }
+
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    margin-bottom: 6px;
+  }
+
+  .subtitle {
+    color: var(--dim);
+    font-size: 0.78rem;
+    margin-bottom: 28px;
+  }
+
+  /* ============ 状态栏 ============ */
+  .status-row {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 20px;
+    font-size: 0.75rem;
+  }
+
+  .status-item { display: flex; align-items: center; gap: 7px; }
+
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+    flex-shrink: 0;
+  }
+  .dot.ok   { background: var(--green); }
+  .dot.warn { background: var(--orange); }
+  .dot.pulse { animation: pulse 1.4s ease-in-out infinite; }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.25} }
+
+  /* ============ 输入与按钮 ============ */
+  .input-row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  input[type=text] {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.82rem;
+    padding: 10px 14px;
+    outline: none;
+  }
+  input[type=text]:focus { border-color: var(--accent); }
+
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.82rem;
+    padding: 10px 18px;
+    transition: background 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+  button:hover { background: #1e1e2e; border-color: var(--accent); }
+  button:disabled { opacity: 0.4; cursor: default; }
+
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #000;
+    font-weight: 600;
+  }
+  .btn-primary:hover { background: #77bbff; border-color: #77bbff; }
+
+  /* ============ 日志面板 ============ */
+  .log-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    height: 220px;
+    overflow-y: auto;
+    padding: 12px 14px;
+    font-size: 0.76rem;
+    line-height: 1.6;
+    margin-bottom: 16px;
+  }
+
+  .log-line { margin-bottom: 2px; }
+  .log-ok   { color: var(--green); }
+  .log-err  { color: var(--red); }
+  .log-warn { color: var(--orange); }
+  .log-dim  { color: var(--dim); }
+
+  /* ============ 信息卡片 ============ */
+  .info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .info-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-size: 0.75rem;
+  }
+
+  .info-card .label { color: var(--dim); margin-bottom: 4px; }
+  .info-card .value { font-size: 0.9rem; font-weight: 600; }
+
+  /* ============ 视频预览（调试用，沉浸模式下隐藏）============ */
+  #videoPreview {
+    width: 100%;
+    border-radius: 8px;
+    display: none;       /* 初始隐藏，收到视频流后显示 */
+    margin-bottom: 16px;
+  }
+
+  /* ============ 辐辏调节滑块 ============ */
+  .conv-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    font-size: 0.78rem;
+  }
+  .conv-row label { color: var(--dim); white-space: nowrap; }
+  .conv-row input[type=range] {
+    flex: 1;
+    accent-color: var(--accent);
+  }
+  .conv-row .conv-val {
+    font-size: 0.82rem;
+    font-weight: 600;
+    min-width: 40px;
+    text-align: right;
+    color: var(--accent);
+  }
+
+  /* WebXR 渲染使用的 canvas（全屏，覆盖整个视口）*/
+  #xrCanvas {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    display: none;       /* 只在 XR 会话期间显示 */
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>ZED Mini 双目接收端</h1>
+  <p class="subtitle">Apple Vision Pro · WebXR 立体渲染 · side-by-side 分眼显示</p>
+
+  <!-- 状态栏 -->
+  <div class="status-row">
+    <div class="status-item">
+      <div class="dot" id="dotWs"></div>
+      <span id="lblWs">信令未连接</span>
+    </div>
+    <div class="status-item">
+      <div class="dot" id="dotRtc"></div>
+      <span id="lblRtc">WebRTC 未就绪</span>
+    </div>
+    <div class="status-item">
+      <div class="dot" id="dotXr"></div>
+      <span id="lblXr">XR 未激活</span>
+    </div>
+  </div>
+
+  <!-- 信令服务器地址输入 -->
+  <div class="input-row">
+    <input type="text" id="wsUrl" value="ws://39.102.113.104:8765"
+           placeholder="ws://信令服务器:端口">
+    <button id="btnConnect" onclick="connectWS()">连接</button>
+    <button id="btnDisconnect" onclick="disconnectWS()" disabled>断开</button>
+  </div>
+
+  <!-- 辐辏（左右眼间距）调节滑块 -->
+  <!-- 向右拖：两眼画面向中间靠拢，近物重影减少；向左拖：恢复原始视差 -->
+  <div class="conv-row">
+    <label>辐辏调节</label>
+    <input type="range" id="convSlider"
+           min="0" max="0.08" step="0.002" value="0.03"
+           oninput="document.getElementById('convVal').textContent =
+                    parseFloat(this.value).toFixed(3)">
+    <span class="conv-val" id="convVal">0.030</span>
+  </div>
+
+  <!-- 进入/退出立体视图 -->
+  <div class="input-row">
+    <button class="btn-primary" id="btnXR" onclick="enterXR()" disabled
+            style="flex:1">进入立体视图 (WebXR)</button>
+    <button id="btnExitXR" onclick="exitXR()" disabled>退出</button>
+  </div>
+
+  <!-- 日志面板 -->
+  <div class="log-panel" id="logPanel"></div>
+
+  <!-- 信息卡片 -->
+  <div class="info-grid">
+    <div class="info-card">
+      <div class="label">视频分辨率</div>
+      <div class="value" id="infoRes">—</div>
+    </div>
+    <div class="info-card">
+      <div class="label">每眼宽度</div>
+      <div class="value" id="infoEye">—</div>
+    </div>
+    <div class="info-card">
+      <div class="label">WebRTC 状态</div>
+      <div class="value" id="infoRtc">—</div>
+    </div>
+    <div class="info-card">
+      <div class="label">XR 会话</div>
+      <div class="value" id="infoXr">未激活</div>
+    </div>
+  </div>
+
+  <!-- 本地视频预览（用于调试，沉浸模式前可以看到画面） -->
+  <video id="videoPreview" autoplay muted playsinline></video>
+</div>
+
+<!-- WebXR 渲染画布（进入 VR 后全屏） -->
+<canvas id="xrCanvas"></canvas>
+
+<script>
+"use strict";
+
+// ================================================================
+//  全局状态
+// ================================================================
+let ws         = null;   // WebSocket 连接
+let pc         = null;   // RTCPeerConnection
+let xrSession  = null;   // WebXR 会话
+let xrRefSpace = null;   // XR 参考空间
+let glCtx      = null;   // WebGL 上下文
+let glLayer    = null;   // XRWebGLLayer
+let videoEl    = null;   // <video> 元素（WebRTC 视频流）
+let videoTex   = null;   // WebGL 视频纹理
+let shaderProg = null;   // WebGL 着色器程序
+let uEyeOffset = null;   // uniform 位置：眼睛偏移量
+let uConvLoc   = null;   // uniform 位置：辐辏调节量
+let vBuf       = null;   // 顶点缓冲区（全屏四边形）
+
+// ================================================================
+//  日志工具
+// ================================================================
+function log(text, cls = '') {
+  const panel = document.getElementById('logPanel');
+  const line  = document.createElement('div');
+  line.className = 'log-line' + (cls ? ' log-' + cls : '');
+
+  const now = new Date();
+  const ts  = `${now.getHours().toString().padStart(2,'0')}:` +
+              `${now.getMinutes().toString().padStart(2,'0')}:` +
+              `${now.getSeconds().toString().padStart(2,'0')}`;
+  line.textContent = `[${ts}] ${text}`;
+
+  panel.appendChild(line);
+  panel.scrollTop = panel.scrollHeight;
+  console.log(text);
+}
+
+// ================================================================
+//  状态指示灯更新
+// ================================================================
+function setDot(id, state) {
+  // state: 'ok' | 'warn' | 'err' | 'pulse'
+  const el = document.getElementById(id);
+  el.className = 'dot' + (state ? ' ' + state : '');
+}
+
+function setLabel(id, text) {
+  document.getElementById(id).textContent = text;
+}
+
+// ================================================================
+//  WebSocket 信令连接
+// ================================================================
+function connectWS() {
+  const url = document.getElementById('wsUrl').value.trim();
+  if (!url) { log('请输入信令服务器地址', 'err'); return; }
+
+  log(`正在连接: ${url}`);
+  setDot('dotWs', 'pulse');
+  setLabel('lblWs', '连接中...');
+
+  try {
+    ws = new WebSocket(url);
+  } catch(e) {
+    log(`WebSocket 创建失败: ${e.message}`, 'err');
+    return;
+  }
+
+  ws.onopen = () => {
+    log('信令服务器连接成功', 'ok');
+    setDot('dotWs', 'ok');
+    setLabel('lblWs', '已连接');
+    document.getElementById('btnConnect').disabled    = true;
+    document.getElementById('btnDisconnect').disabled = false;
+
+    // 向信令服务器注册为接收端
+    ws.send(JSON.stringify({
+      type: 'register',
+      role: 'receiver',
+      device: 'vision-pro',
+      client: 'webxr-stereo-receiver'
+    }));
+    log('已注册为接收端 (receiver)', 'ok');
+  };
+
+  ws.onclose = () => {
+    log('信令连接已关闭', 'warn');
+    setDot('dotWs', 'err');
+    setLabel('lblWs', '已断开');
+    document.getElementById('btnConnect').disabled    = false;
+    document.getElementById('btnDisconnect').disabled = true;
+    ws = null;
+  };
+
+  ws.onerror = (e) => {
+    log('信令连接错误', 'err');
+    setDot('dotWs', 'err');
+  };
+
+  ws.onmessage = async (evt) => {
+    let data;
+    try { data = JSON.parse(evt.data); }
+    catch(e) { return; }
+
+    const t = data.type || '';
+    log(`收到消息: type=${t}`, 'dim');
+
+    if (t === 'offer') {
+      // 收到发送端的 SDP Offer，开始 WebRTC 握手
+      await handleOffer(data);
+
+    } else if (t === 'ice') {
+      // 收到发送端的 ICE 候选，添加到本地 peer connection
+      if (pc && data.candidate) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate({
+            sdpMLineIndex: data.sdpMLineIndex,
+            candidate:     data.candidate
+          }));
+          log('ICE 候选已添加', 'dim');
+        } catch(e) {
+          log(`添加 ICE 候选失败: ${e.message}`, 'warn');
+        }
+      }
+
+    } else if (t === 'heartbeat') {
+      // 心跳回复
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'pong', t: Date.now() / 1000 }));
+      }
+    }
+  };
+}
+
+function disconnectWS() {
+  if (ws) { ws.close(); ws = null; }
+}
+
+// ================================================================
+//  WebRTC 握手
+// ================================================================
+async function handleOffer(data) {
+  log('收到 SDP Offer，开始 WebRTC 握手...', 'ok');
+
+  // 记录发送端元数据（分辨率等）
+  if (data.width && data.height) {
+    document.getElementById('infoRes').textContent = `${data.width}×${data.height}`;
+    document.getElementById('infoEye').textContent =
+      `${data.eye_width || Math.round(data.width / 2)}×${data.height}`;
+    log(`发送端分辨率: ${data.width}×${data.height} (每眼 ${data.eye_width || data.width/2}×${data.height})`);
+  }
+
+  // 关闭旧的 peer connection（如果有）
+  if (pc) { pc.close(); pc = null; }
+
+  // 创建新的 RTCPeerConnection（配置 TURN 服务器用于 NAT 穿透）
+  pc = new RTCPeerConnection({
+    iceServers: [{
+      urls:       'turn:39.102.113.104:3478',
+      username:   'remote',
+      credential: 'Wawjxyz3!'
+    }, {
+      // STUN 服务器（内网直连使用，无法穿透时退回 TURN）
+      urls: 'stun:stun.l.google.com:19302'
+    }]
+  });
+
+  // 当本端生成 ICE 候选时，发给信令服务器转发给对端
+  pc.onicecandidate = (evt) => {
+    if (evt.candidate && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type:         'ice',
+        sdpMLineIndex: evt.candidate.sdpMLineIndex,
+        candidate:    evt.candidate.candidate
+      }));
+      log('ICE 候选已发送', 'dim');
+    }
+  };
+
+  // 监听连接状态变化
+  pc.onconnectionstatechange = () => {
+    const state = pc.connectionState;
+    log(`WebRTC 连接状态: ${state}`);
+    document.getElementById('infoRtc').textContent = state;
+
+    if (state === 'connected') {
+      setDot('dotRtc', 'ok');
+      setLabel('lblRtc', 'WebRTC 已连接');
+      // 视频流已建立，允许进入 XR 模式
+      document.getElementById('btnXR').disabled = false;
+      log('视频流已建立，可点击"进入立体视图"', 'ok');
+    } else if (state === 'failed' || state === 'disconnected') {
+      setDot('dotRtc', 'err');
+      setLabel('lblRtc', state);
+      document.getElementById('btnXR').disabled = true;
+    } else {
+      setDot('dotRtc', 'warn');
+      setLabel('lblRtc', state);
+    }
+  };
+
+  // 收到远端视频轨道（ZED Mini 推送的画面到达）
+  pc.ontrack = (evt) => {
+    log('收到视频轨道！', 'ok');
+
+    if (!videoEl) {
+      // 创建隐藏的 <video> 元素，作为 WebGL 纹理的数据源
+      videoEl = document.getElementById('videoPreview');
+    }
+
+    videoEl.srcObject   = evt.streams[0];
+    videoEl.style.display = 'block';   // 显示预览
+
+    // 视频元数据加载后更新分辨率显示
+    videoEl.onloadedmetadata = () => {
+      const w = videoEl.videoWidth;
+      const h = videoEl.videoHeight;
+      log(`视频分辨率: ${w}×${h}`, 'ok');
+      document.getElementById('infoRes').textContent = `${w}×${h}`;
+      document.getElementById('infoEye').textContent = `${Math.round(w/2)}×${h}`;
+    };
+  };
+
+  // 设置远端描述（发送端的 SDP Offer）
+  await pc.setRemoteDescription(new RTCSessionDescription({
+    type: 'offer',
+    sdp:  data.sdp
+  }));
+  log('远端描述设置完成');
+
+  // 创建并设置本地 Answer
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  log('本地描述设置完成');
+
+  // 将 Answer 发回信令服务器，转发给发送端
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'answer',
+      sdp:  answer.sdp
+    }));
+    log('SDP Answer 已发送', 'ok');
+  } else {
+    log('WebSocket 未连接，无法发送 Answer', 'err');
+  }
+}
+
+// ================================================================
+//  WebGL 初始化（用于 WebXR 立体渲染）
+// ================================================================
+
+/**
+ * 顶点着色器：绘制一个覆盖整个 NDC 空间的全屏四边形
+ * 同时输出 UV 坐标给片元着色器
+ */
+const VERT_SRC = `
+  attribute vec2 aPos;
+  varying   vec2 vUV;
+  void main() {
+    // aPos 是 [-1,1] 的 NDC 坐标
+    gl_Position = vec4(aPos, 0.0, 1.0);
+    // UV 坐标从 [0,1]，Y 轴翻转（WebGL 纹理原点在左下，视频原点在左上）
+    vUV = vec2((aPos.x + 1.0) * 0.5, 1.0 - (aPos.y + 1.0) * 0.5);
+  }
+`;
+
+/**
+ * 片元着色器：根据眼睛类型，从视频纹理的左半或右半采样
+ *
+ * ZED Mini 输出格式（side-by-side）：
+ *   |------ 左眼画面 -------|------ 右眼画面 -------|
+ *   UV.x: 0.0             0.5                   1.0
+ *
+ * 左眼（uEyeOffset=0.0）：UV.x 映射到 [0.0, 0.5]
+ * 右眼（uEyeOffset=0.5）：UV.x 映射到 [0.5, 1.0]
+ */
+const FRAG_SRC = `
+  precision mediump float;
+  uniform sampler2D uTex;
+  uniform float     uEyeOff;   /* 左眼=0.0, 右眼=0.5 */
+  uniform float     uConv;     /* 辐辏调节量：左眼右移 +uConv，右眼左移 -uConv */
+  varying vec2      vUV;
+  void main() {
+    /* 辐辏方向：左眼(uEyeOff<0.25) 向右移，右眼向左移，减少近物视差 */
+    float shift = uEyeOff < 0.25 ? uConv : -uConv;
+    /* 将全屏 UV 的 x 轴压缩到左半或右半，再叠加辐辏偏移 */
+    vec2 uv = vec2(vUV.x * 0.5 + uEyeOff + shift, vUV.y);
+    gl_FragColor = texture2D(uTex, uv);
+  }
+`;
+
+function initGL(canvas) {
+  /** 初始化 WebGL 上下文和着色器程序 */
+
+  // 创建 WebGL2 上下文（XRWebGLLayer 需要 WebGL context）
+  const gl = canvas.getContext('webgl2', {
+    xrCompatible: true,   // 必须声明，否则无法创建 XRWebGLLayer
+    antialias:    false    // 关闭抗锯齿提升性能（视频纹理不需要）
+  });
+  if (!gl) { log('WebGL2 不可用，尝试 WebGL1...', 'warn'); return null; }
+
+  // 编译着色器的辅助函数
+  function compile(type, src) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      log('着色器编译失败: ' + gl.getShaderInfoLog(sh), 'err');
+      return null;
+    }
+    return sh;
+  }
+
+  // 创建着色器程序
+  const vert = compile(gl.VERTEX_SHADER,   VERT_SRC);
+  const frag = compile(gl.FRAGMENT_SHADER, FRAG_SRC);
+  if (!vert || !frag) return null;
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vert);
+  gl.attachShader(prog, frag);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    log('着色器链接失败: ' + gl.getProgramInfoLog(prog), 'err');
+    return null;
+  }
+  gl.useProgram(prog);
+
+  // 保存全局引用
+  shaderProg = prog;
+  uEyeOffset = gl.getUniformLocation(prog, 'uEyeOff');
+  uConvLoc   = gl.getUniformLocation(prog, 'uConv');     // 辐辏调节 uniform
+  gl.uniform1i(gl.getUniformLocation(prog, 'uTex'), 0);  // 纹理单元 0
+
+  // 创建全屏四边形顶点缓冲区（两个三角形组成矩形，覆盖整个 NDC）
+  // 顶点顺序：左下、右下、左上、右上（TRIANGLE_STRIP 绘制）
+  const verts = new Float32Array([
+    -1, -1,   // 左下
+     1, -1,   // 右下
+    -1,  1,   // 左上
+     1,  1    // 右上
+  ]);
+  vBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+
+  // 绑定顶点属性
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  // 创建视频纹理（内容在渲染循环中每帧更新）
+  videoTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, videoTex);
+  // 设置纹理参数（视频纹理通常不是 2 的幂次，需要 CLAMP_TO_EDGE）
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S,     gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T,     gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+  log('WebGL 初始化成功', 'ok');
+  return gl;
+}
+
+// ================================================================
+//  WebXR 会话管理
+// ================================================================
+async function enterXR() {
+  /** 进入 WebXR immersive-vr 模式（Vision Pro 双眼沉浸视图）*/
+
+  if (!videoEl || !videoEl.srcObject) {
+    log('尚未收到视频流，请先连接信令服务器', 'warn');
+    return;
+  }
+
+  if (!navigator.xr) {
+    log('此浏览器不支持 WebXR', 'err');
+    log('如在 Vision Pro Safari 上：设置 → Apps → Safari → Advanced → Feature Flags → WebXR Device API', 'warn');
+    // 降级：直接全屏播放 side-by-side 视频（不分眼，仅预览）
+    fallbackFullscreen();
+    return;
+  }
+
+  // 检查 immersive-vr 支持
+  let supported = false;
+  try { supported = await navigator.xr.isSessionSupported('immersive-vr'); }
+  catch(e) {}
+
+  if (!supported) {
+    log('不支持 immersive-vr 模式，启用降级全屏方案', 'warn');
+    fallbackFullscreen();
+    return;
+  }
+
+  log('正在进入 WebXR immersive-vr 会话...');
+
+  // 初始化 WebGL（使用 xrCanvas）
+  const canvas = document.getElementById('xrCanvas');
+  glCtx = initGL(canvas);
+  if (!glCtx) {
+    log('WebGL 初始化失败', 'err');
+    return;
+  }
+
+  // 请求 WebXR 会话
+  try {
+    xrSession = await navigator.xr.requestSession('immersive-vr', {
+      requiredFeatures: ['local']   // 需要 local 参考空间（6DoF 头部追踪）
+    });
+  } catch(e) {
+    log(`WebXR 会话请求失败: ${e.message}`, 'err');
+    return;
+  }
+
+  // 将 WebGL context 绑定到 XR 渲染层
+  glLayer = new XRWebGLLayer(xrSession, glCtx);
+  await xrSession.updateRenderState({ baseLayer: glLayer });
+
+  // 获取 local 参考空间（相对于会话开始位置的坐标系）
+  xrRefSpace = await xrSession.requestReferenceSpace('local');
+
+  // 会话结束时清理
+  xrSession.onend = () => {
+    log('XR 会话已结束');
+    setDot('dotXr', 'err');
+    setLabel('lblXr', 'XR 已退出');
+    document.getElementById('infoXr').textContent  = '已退出';
+    document.getElementById('btnExitXR').disabled  = true;
+    document.getElementById('xrCanvas').style.display = 'none';
+    xrSession = null;
+  };
+
+  // 显示渲染画布
+  canvas.style.display = 'block';
+  document.getElementById('videoPreview').style.display = 'none';  // 隐藏预览
+  document.getElementById('btnExitXR').disabled = false;
+  document.getElementById('btnXR').disabled     = true;
+  setDot('dotXr', 'ok');
+  setLabel('lblXr', 'XR 运行中');
+  document.getElementById('infoXr').textContent = '运行中';
+
+  log('WebXR 会话已启动！左眼=左视角，右眼=右视角', 'ok');
+
+  // 启动 XR 渲染循环
+  xrSession.requestAnimationFrame(onXRFrame);
+}
+
+function onXRFrame(time, frame) {
+  /**
+   * WebXR 每帧渲染回调。
+   * 对每个眼睛（view），分别设置 UV 偏移并绘制全屏四边形。
+   *
+   * 关键逻辑：
+   *   - 左眼 view.eye === 'left'  → uEyeOffset = 0.0 → 取视频左半
+   *   - 右眼 view.eye === 'right' → uEyeOffset = 0.5 → 取视频右半
+   */
+  if (!xrSession) return;
+  xrSession.requestAnimationFrame(onXRFrame);  // 请求下一帧
+
+  const gl   = glCtx;
+  const pose = frame.getViewerPose(xrRefSpace);
+  if (!pose) return;
+
+  // 绑定 XR 帧缓冲区（XRWebGLLayer 管理的双眼 FBO）
+  gl.bindFramebuffer(gl.FRAMEBUFFER, glLayer.framebuffer);
+
+  // 清除帧缓冲
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  // 更新视频纹理（每帧从 <video> 元素上传最新帧到 GPU）
+  if (videoEl && videoEl.readyState >= videoEl.HAVE_CURRENT_DATA) {
+    gl.bindTexture(gl.TEXTURE_2D, videoTex);
+    // texImage2D 会将当前 <video> 帧内容上传到 GPU 纹理
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA,
+      gl.RGBA, gl.UNSIGNED_BYTE,
+      videoEl
+    );
+  }
+
+  // 激活纹理单元 0，绑定视频纹理
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, videoTex);
+
+  // 绑定顶点缓冲区
+  gl.bindBuffer(gl.ARRAY_BUFFER, vBuf);
+  const aPos = gl.getAttribLocation(shaderProg, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  // 读取辐辏滑块值（0.0 ~ 0.08，默认 0.03）
+  // 数值越大，左右眼图像越向中间靠拢，近物重影越少
+  const convSlider = document.getElementById('convSlider');
+  const conv = convSlider ? parseFloat(convSlider.value) : 0.03;
+  gl.uniform1f(uConvLoc, conv);
+
+  // 对每个眼睛单独渲染
+  for (const view of pose.views) {
+    // 设置此眼睛对应的视口（XRWebGLLayer 管理左右眼 viewport 分割）
+    const vp = glLayer.getViewport(view);
+    gl.viewport(vp.x, vp.y, vp.width, vp.height);
+
+    // 根据眼睛类型设置 UV 偏移
+    //   左眼：取视频纹理 x=[0.0, 0.5]（ZED Mini 左眼画面）
+    //   右眼：取视频纹理 x=[0.5, 1.0]（ZED Mini 右眼画面）
+    const eyeOff = (view.eye === 'left') ? 0.0 : 0.5;
+    gl.uniform1f(uEyeOffset, eyeOff);
+
+    // 绘制全屏四边形（4个顶点，TRIANGLE_STRIP 绘制两个三角形组成矩形）
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+}
+
+function exitXR() {
+  /** 退出 WebXR 会话 */
+  if (xrSession) {
+    xrSession.end();
+  }
+}
+
+// ================================================================
+//  降级方案：全屏播放（不支持 WebXR 时使用）
+// ================================================================
+function fallbackFullscreen() {
+  /**
+   * 降级方案：将 <video> 全屏显示。
+   * 此时 Vision Pro 会看到 side-by-side 的完整画面（不分眼）。
+   * 适合调试，或在非 Vision Pro 设备上预览。
+   */
+  if (!videoEl) return;
+
+  log('降级：全屏播放 side-by-side 视频（不分眼）', 'warn');
+
+  if (videoEl.requestFullscreen) {
+    videoEl.requestFullscreen();
+  } else if (videoEl.webkitEnterFullscreen) {
+    videoEl.webkitEnterFullscreen();   // Safari / Vision Pro
+  }
+}
+
+// ================================================================
+//  页面初始化
+// ================================================================
+window.addEventListener('load', () => {
+  log('页面加载完成', 'ok');
+  log('请连接信令服务器，等待 ZED Mini 发送端推流');
+
+  // 检查 WebXR 支持
+  if (!navigator.xr) {
+    log('⚠ 此浏览器不支持 WebXR（将使用降级全屏方案）', 'warn');
+    log('  Vision Pro Safari：设置 → Apps → Safari → Advanced → Feature Flags → WebXR Device API', 'dim');
+    setDot('dotXr', 'warn');
+    setLabel('lblXr', 'XR 不支持');
+  } else {
+    navigator.xr.isSessionSupported('immersive-vr').then(ok => {
+      if (ok) {
+        log('WebXR immersive-vr 支持已确认', 'ok');
+        setDot('dotXr', 'warn');
+        setLabel('lblXr', '等待激活');
+      } else {
+        log('不支持 immersive-vr（将使用降级全屏方案）', 'warn');
+        setDot('dotXr', 'warn');
+        setLabel('lblXr', 'VR 不支持');
+      }
+    }).catch(() => {});
+  }
+});
+</script>
+</body>
+</html>

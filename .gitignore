@@ -8,3 +8,28 @@ Build/
 .build/
 xcuserdata/
 *.log
+
+# ROS2 编译产物（只跟踪 src/）
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# 大文件 / 压缩包
+rentou.zip
+
+# MuJoCo 日志
+MUJOCO_LOG.TXT
+scripts/MUJOCO_LOG.TXT
+
+# Claude Code 本地配置
+.claude/
+
+# 独立 git 仓库（已在 device-a-linux/ 中）
+DM_Control_Python/
+
+# CAD 源文件压缩包
+HZY/*.zip
+
+# 二进制 CAD 文件
+*.SLDPRT
+*.STEP

@@ -1,0 +1,8 @@
+# 切换 dm_motor_controller 的跟手感档位
+# 5 档预设: L1=安全 / L2=温和 / L3=默认 / L4=跟手 / L5=激进
+# 详见 dm_motor/PRESETS.md
+
+string preset_name      # L1 / L2 / L3 / L4 / L5
+---
+bool success
+string message          # 错误信息或者切换后的实际参数值

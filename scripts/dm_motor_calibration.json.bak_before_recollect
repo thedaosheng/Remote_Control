@@ -1,0 +1,31 @@
+{
+  "round1_long_pin": {
+    "timestamp": "2026-04-07T18:00:39",
+    "description": "长钉到位时的极值 (用户掰到一侧机械限位)",
+    "motor1_yaw_can01_rad": 0.6523231714963913,
+    "motor1_yaw_can01_deg": 37.375364605331825,
+    "motor2_pitch_can02_rad": -0.7179369777441025,
+    "motor2_pitch_can02_deg": -41.13475878111478
+  },
+  "round2_short_pin": {
+    "timestamp": "2026-04-07T18:03:24",
+    "description": "短钉到位时的极值 (用户掰到另一侧机械限位)",
+    "motor1_yaw_can01_rad": -0.6618600487709045,
+    "motor1_yaw_can01_deg": -37.92178742289566,
+    "motor2_pitch_can02_rad": 0.7038223892450333,
+    "motor2_pitch_can02_deg": 40.32605243055423
+  },
+  "summary": {
+    "motor1_yaw_can01": {
+      "min_deg": -37.92178742289566,
+      "max_deg": 37.375364605331825
+    },
+    "motor2_pitch_can02": {
+      "min_deg": -41.13475878111478,
+      "max_deg": 40.32605243055423
+    },
+    "safety_margin_deg": 5.0,
+    "physical_mapping_note": "电机1(0x01)=Yaw 左右转头  电机2(0x02)=Pitch 俯仰点头",
+    "recalibrated_note": "2026-04-07 重新校准: 工作区中央设为新零点 (旧零点偏移 yaw=-27.14° pitch=-8.80°)"
+  }
+}

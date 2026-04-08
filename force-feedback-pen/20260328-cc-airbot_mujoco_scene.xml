@@ -1,0 +1,480 @@
+<!--
+  20260328-cc-airbot_mujoco_scene.xml
+  ====================================
+  Airbot Play 六轴机械臂 MuJoCo 力控仿真场景
+
+  重要说明：
+  本文件的机械臂运动学链完全基于官方 DISCOVERSE 模型：
+    /home/rhz/YZL/home/edward/hil-serl/DISCOVERSE-main/models/mjcf/
+      manipulator/airbot_play_force/airbot_play_force.xml（运动学）
+      manipulator/airbot_play_force/airbot_play_force_appendix.xml（夹爪 tendon/equality）
+
+  与之前版本的关键区别：
+  1. 使用 airbot_play_force STL 网格（非 airbot_play obj）
+  2. 运动学链（link3/link4 quat/pos）与官方一致
+  3. endpoint site 位置和姿态与官方一致：pos='0 0 0.236' quat="0.5 0.5 -0.5 0.5"
+  4. 夹爪 g2 body 位置和姿态与官方一致：pos="0 0 0.166"
+  5. 夹爪控制逻辑：ctrl=0=闭合，ctrl=0.0366=全开
+
+  执行器（共 7 个）：
+  - motor1~motor6：直接力矩控制，用于阻抗控制器
+  - gripper：位置控制（tendon），ctrlrange="0 0.0366"，0=闭合，0.0366=全开
+-->
+<mujoco model="airbot_play_force_teleop">
+
+  <!-- 编译器：meshdir 指向官方 DISCOVERSE meshes 目录 -->
+  <compiler angle="radian"
+            meshdir="/home/rhz/YZL/home/edward/hil-serl/DISCOVERSE-main/models/meshes/"
+            autolimits="true"/>
+
+  <!-- 物理参数 -->
+  <option timestep="0.002"
+          iterations="50"
+          solver="Newton"
+          integrator="Euler"
+          gravity="0 0 -9.81"
+          cone="elliptic"
+          noslip_iterations="5">
+    <flag contact="enable" energy="enable"/>
+  </option>
+
+  <!-- 统计中心（影响相机默认视角） -->
+  <statistic center="0.15 0 0.9" extent="0.9"/>
+
+  <!-- 视觉设置 -->
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="120" elevation="-20"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <!-- ============================================================ -->
+  <!-- 默认参数类 -->
+  <!-- ============================================================ -->
+  <default>
+    <default class="aribot_play">
+      <!-- 视觉 geom：仅渲染，不参与碰撞 -->
+      <default class="visual">
+        <geom group="2" type="mesh" contype="0" conaffinity="0"/>
+      </default>
+      <!-- 碰撞 geom -->
+      <default class="collision">
+        <geom group="3" condim="6"
+              solimp="2 1 0.01" solref="0.001 10"
+              friction="1 0.005 0.0001"/>
+      </default>
+      <!-- 主臂关节（按官方 ctrlrange 设置） -->
+      <default class="joint_arm">
+        <joint axis="0 0 1" damping="0.2" frictionloss="5"/>
+      </default>
+      <!--
+        夹爪滑动关节：
+          axis="0 0 1"（在各自 body 局部坐标系下）
+          g2_left body quat → 局部 Z 对应世界 -X（左移）
+          g2_right body quat → 局部 Z 对应世界 +X（右移）
+          range="0 0.0366"：0=闭合（居中），0.0366=全开（分开）
+          damping=5：防止手腕运动时手指漂移
+      -->
+      <default class="finger">
+        <joint axis="0 0 1" type="slide" range="0 0.0366" damping="5" frictionloss="0"/>
+      </default>
+    </default>
+    <site size="0.001" group="3"/>
+  </default>
+
+  <!-- ============================================================ -->
+  <!-- 资源 -->
+  <!-- ============================================================ -->
+  <asset>
+    <!-- 天空盒 -->
+    <texture type="skybox" builtin="gradient"
+             rgb1="0.3 0.5 0.7" rgb2="0 0 0"
+             width="512" height="3072"/>
+    <!-- 地面纹理 -->
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
+             width="300" height="300"/>
+    <material name="groundplane" texture="groundplane"
+              texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+
+    <!-- 物块材质 -->
+    <material name="block_mat" specular="0.3" shininess="0.3"
+              rgba="0.2 0.7 0.3 1.0"/>
+    <!-- 目标标记材质（半透明红球） -->
+    <material name="target_mat" specular="0.1" shininess="0.1"
+              rgba="1.0 0.2 0.2 0.4"/>
+
+    <!--
+      官方 airbot_play_force STL 网格
+      路径相对于 meshdir（DISCOVERSE-main/models/meshes/）
+    -->
+    <mesh name="base_link"           file="airbot_play_force/base_link.STL"/>
+    <mesh name="link1"               file="airbot_play_force/link1.STL"/>
+    <mesh name="link2"               file="airbot_play_force/link2.STL"/>
+    <mesh name="link3"               file="airbot_play_force/link3.STL"/>
+    <mesh name="link4"               file="airbot_play_force/link4.STL"/>
+    <mesh name="link5"               file="airbot_play_force/link5.STL"/>
+    <mesh name="link6"               file="airbot_play_force/link6.STL"/>
+    <mesh name="eef_connect_base_link" file="airbot_play_force/eef_connect_base_link.STL"/>
+    <mesh name="g2_base_link"        file="airbot_play_force/g2_base_link.STL"/>
+    <mesh name="g2_left_link"        file="airbot_play_force/g2_left_link.STL"/>
+    <mesh name="g2_right_link"       file="airbot_play_force/g2_right_link.STL"/>
+  </asset>
+
+  <!-- ============================================================ -->
+  <!-- 世界主体 -->
+  <!-- ============================================================ -->
+  <worldbody>
+    <!-- 光源 -->
+    <light pos="1 0 2" dir="-0.5 0 -0.8" diffuse="0.8 0.8 0.8"/>
+    <light pos="0.3 1 2" dir="0 -0.5 -0.8" diffuse="0.6 0.6 0.6"/>
+    <light pos="-0.5 -0.5 2" dir="0.3 0.3 -0.8" diffuse="0.4 0.4 0.4"/>
+
+    <!-- 地面 -->
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+    <!-- 桌子（顶面 z≈0.78m） -->
+    <body name="table" pos="0.4 0 0" euler="0 0 1.5708">
+      <geom name="table_top" size="0.3 0.6 0.01" pos="0 0 0.77" type="box"
+            rgba="0.75 0.7 0.65 1" condim="4"
+            solimp="2 1 0.01" solref="0.01 1"
+            friction="1 0.005 0.0001"/>
+      <geom size="0.02 0.02 0.385" pos=" 0.28  0.56 0.385" type="box"
+            contype="0" conaffinity="0" rgba="0.6 0.6 0.6 1"/>
+      <geom size="0.02 0.02 0.385" pos="-0.28  0.56 0.385" type="box"
+            contype="0" conaffinity="0" rgba="0.6 0.6 0.6 1"/>
+      <geom size="0.02 0.02 0.385" pos=" 0.28 -0.56 0.385" type="box"
+            contype="0" conaffinity="0" rgba="0.6 0.6 0.6 1"/>
+      <geom size="0.02 0.02 0.385" pos="-0.28 -0.56 0.385" type="box"
+            contype="0" conaffinity="0" rgba="0.6 0.6 0.6 1"/>
+    </body>
+
+    <!-- =========================================== -->
+    <!-- 目标位置可视化（mocap，三色坐标轴显示期望姿态） -->
+    <!-- =========================================== -->
+    <body name="target" mocap="true" pos="0.3 0 1.0">
+      <geom type="sphere" size="0.012" material="target_mat"
+            contype="0" conaffinity="0"/>
+      <!-- X 轴（红）-->
+      <geom type="cylinder" size="0.002 0.02" pos="0.02 0 0" euler="0 1.5708 0"
+            rgba="1 0 0 0.6" contype="0" conaffinity="0"/>
+      <!-- Y 轴（绿）-->
+      <geom type="cylinder" size="0.002 0.02" pos="0 0.02 0" euler="1.5708 0 0"
+            rgba="0 1 0 0.6" contype="0" conaffinity="0"/>
+      <!-- Z 轴（蓝）-->
+      <geom type="cylinder" size="0.002 0.02" pos="0 0 0.02"
+            rgba="0 0 1 0.6" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- =========================================== -->
+    <!-- Airbot Play 机械臂（挂载在桌面上，z=0.78m） -->
+    <!-- 运动学完全基于官方 airbot_play_force.xml     -->
+    <!-- =========================================== -->
+    <body name="airbot_play_pose" pos="0 0 0.78">
+      <body name="arm_base" childclass="aribot_play">
+        <site name="armbase"/>
+        <geom type="mesh" rgba="0.75294 0.75294 0.75294 1"
+              mesh="base_link" contype="0" conaffinity="0"/>
+
+        <!-- === Link 1（官方：pos="0 0 0.1127"） === -->
+        <body name="link1" pos="0 0 0.1127">
+          <inertial pos="0.00014396 -0.00098536 -0.020968"
+                    quat="0.996851 -0.00552866 0.00131697 0.0790989"
+                    mass="0.607"
+                    diaginertia="0.00111427 0.00101111 0.000386618"/>
+          <joint name="joint1" axis="0 0 1" range="-3.1416 2.0944"
+                 actuatorfrcrange="-24 24" damping="0.2" frictionloss="15"/>
+          <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="link1"/>
+
+          <!-- === Link 2 === -->
+          <body name="link2" quat="0.135867 0.135871 -0.693931 0.69393">
+            <inertial pos="0.13769 0.012537 0.0044739"
+                      quat="0.544988 0.469712 0.519552 0.460896"
+                      mass="0.918"
+                      diaginertia="0.0348354 0.0346196 0.000895236"/>
+            <joint name="joint2" axis="0 0 1" range="-2.9671 0.17453"
+                   actuatorfrcrange="-24 24" damping="0.2" frictionloss="15"/>
+            <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="link2"/>
+
+            <!--
+              === Link 3（官方 quat="0.55806 0 0 0.8298"）===
+              注意：我们之前用的是 quat="0.192144 0 0 -0.981367"（完全错误）
+            -->
+            <body name="link3" pos="0.27009 0 0" quat="0.55806 0 0 0.8298">
+              <inertial pos="1.5134e-05 0.10706 0.0082136"
+                        quat="0.709512 0.704687 -0.00192802 0.00241094"
+                        mass="0.7"
+                        diaginertia="0.0156592 0.0154818 0.000458584"/>
+              <joint name="joint3" axis="0 0 1" range="-0.087266 3.1416"
+                     actuatorfrcrange="-24 24" damping="0.2" frictionloss="15"/>
+              <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="link3"/>
+
+              <!--
+                === Link 4（官方 pos="0 0.29015 0"，沿 Y 方向，非 X 方向）===
+                注意：我们之前用的是 pos="0.29015 0 0"（错误方向）
+                官方 quat="0.499998 -0.5 -0.5 -0.500002"
+              -->
+              <body name="link4" pos="0 0.29015 0"
+                    quat="0.499998 -0.5 -0.5 -0.500002">
+                <inertial pos="-1.6216e-05 0.002995 -0.019407"
+                          quat="0.705825 -0.00378066 0.00351614 0.708367"
+                          mass="0.359"
+                          diaginertia="0.000529292 0.00051773 0.000136768"/>
+                <joint name="joint4" axis="0 0 1" range="-3.0107 3.0107"
+                       actuatorfrcrange="-8 8" damping="0.1" frictionloss="5"/>
+                <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="link4"/>
+
+                <!-- === Link 5 === -->
+                <body name="link5" quat="0.707105 0.707108 0 0">
+                  <inertial pos="-4.5037e-05 0.033144 0.0024106"
+                            quat="0.686718 0.726922 0.00098681 -0.00117372"
+                            mass="0.403"
+                            diaginertia="0.00116016 0.0010873 0.000239772"/>
+                  <joint name="joint5" axis="0 0 1" range="-1.7628 1.7628"
+                         actuatorfrcrange="-8 8" damping="0.1" frictionloss="5"/>
+                  <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="link5"/>
+
+                  <!--
+                    === Link 6（官方 quat="0.707105 -0.707108 0 0"）===
+                    注意：我们之前用的是 quat="0.499998 -0.5 0.5 0.500002"（错误）
+                  -->
+                  <body name="link6" quat="0.707105 -0.707108 0 0">
+                    <inertial pos="-1.12859e-05 -0.00288488 0.120334"
+                              quat="0.690668 -0.0374648 0.0402513 0.721078"
+                              mass="0.617009"
+                              diaginertia="0.00266817 0.00259226 0.000587714"/>
+                    <joint name="joint6" axis="0 0 1" range="-3.0107 3.0107"
+                           actuatorfrcrange="-8 8" damping="0.1" frictionloss="5"/>
+                    <geom type="mesh" rgba="1 1 1 1" mesh="link6"/>
+
+                    <!-- 夹爪底座（固定，连接件） -->
+                    <geom pos="0 0 0.0955" quat="1 0 0 0" type="mesh"
+                          rgba="0.89804 0.91765 0.92941 1"
+                          mesh="eef_connect_base_link"
+                          contype="0" conaffinity="0"/>
+                    <geom pos="0 0 0.0955" quat="1 0 0 0" type="mesh"
+                          rgba="0.75294 0.75294 0.75294 1"
+                          mesh="g2_base_link"
+                          contype="0" conaffinity="0"/>
+
+                    <!--
+                      末端工具中心点（TCP）
+                      官方：pos='0 0 0.236' quat="0.5 0.5 -0.5 0.5"
+                      我们之前用的是 pos="0 0 0.015" euler="0 -1.5708 0"（严重错误）
+                    -->
+                    <site name="endpoint" pos="0 0 0.236" quat="0.5 0.5 -0.5 0.5"/>
+
+                    <!--
+                      === 左夹爪指（g2_left_link）===
+                      官方：pos="0 0 0.166" quat="0.707105 0 -0.707108 0"
+                        该 quat 对应 Ry(-90°)，局部 Z 轴映射到世界 -X 方向
+                        joint axis="0 0 1" range="0 0.0366"
+                        q=0 → 居中（闭合），q=0.0366 → 向 -X 伸出（张开）
+                    -->
+                    <body name="g2_left_link" pos="0 0 0.166"
+                          quat="0.707105 0 -0.707108 0">
+                      <inertial pos="0.018307 5.9636e-06 0.012505"
+                                quat="0 0.798204 0 0.602388"
+                                mass="0.054004"
+                                diaginertia="5.10732e-05 4.78e-05 2.24468e-05"/>
+                      <joint name="g2_left_joint" axis="0 0 1"
+                             type="slide" range="0 0.0366"
+                             damping="5" frictionloss="0"/>
+                      <!-- 左指摩擦：高摩擦系数帮助夹稳物体 -->
+                      <geom type="mesh" rgba="0.75294 0.75294 0.75294 1"
+                            mesh="g2_left_link"
+                            condim="6" friction="3.0 1.0 0.1"/>
+                      <!-- 左指尖接触检测 -->
+                      <site name="left_finger_tip" pos="0 0 0.025" size="0.005"/>
+                    </body>
+
+                    <!--
+                      === 右夹爪指（g2_right_link）===
+                      官方：pos="0 0 0.166" quat="-2.59734e-06 0.707105 2.59735e-06 0.707108"
+                        该 quat 对应 Rx(90°)，局部 Z 轴映射到世界 +X 方向
+                        joint axis="0 0 1" range="0 0.0366"
+                        q=0 → 居中（闭合），q=0.0366 → 向 +X 伸出（张开）
+                    -->
+                    <body name="g2_right_link" pos="0 0 0.166"
+                          quat="-2.59734e-06 0.707105 2.59735e-06 0.707108">
+                      <inertial pos="0.018307 -6.8572e-07 0.012505"
+                                quat="0 0.602388 0 0.798204"
+                                mass="0.054004"
+                                diaginertia="5.10732e-05 4.78e-05 2.24468e-05"/>
+                      <joint name="g2_right_joint" axis="0 0 1"
+                             type="slide" range="0 0.0366"
+                             damping="5" frictionloss="0"/>
+                      <!-- 右指摩擦：高摩擦系数帮助夹稳物体 -->
+                      <geom type="mesh" rgba="0.75294 0.75294 0.75294 1"
+                            mesh="g2_right_link"
+                            condim="6" friction="3.0 1.0 0.1"/>
+                      <!-- 右指尖接触检测 -->
+                      <site name="right_finger_tip" pos="0 0 0.025" size="0.005"/>
+                    </body>
+
+                  </body> <!-- link6 -->
+                </body> <!-- link5 -->
+              </body> <!-- link4 -->
+            </body> <!-- link3 -->
+          </body> <!-- link2 -->
+        </body> <!-- link1 -->
+      </body> <!-- arm_base -->
+    </body> <!-- airbot_play_pose -->
+
+    <!-- =========================================== -->
+    <!-- 可抓取物体（自由体）——圆柱形，模拟瓶/罐 -->
+    <!-- 尺寸：半径 18mm，高 50mm（半高 25mm）       -->
+    <!-- 质量 15g，轻到夹爪可以轻松抬起               -->
+    <!-- =========================================== -->
+    <body name="block" pos="0.40 0.0 0.8125">
+      <freejoint name="block_joint"/>
+      <inertial pos="0 0 0" mass="0.015"
+                diaginertia="3e-06 3e-06 2e-06"/>
+      <!--
+        接触参数说明：
+          solimp="0.85 0.95 0.001"：软化接触（第一项越小越软），减少"硬墙"感
+          solref="0.02 1.0"：接触刚度时间常数 20ms，更柔顺
+          friction="3.0 1.0 0.1"：大幅提高摩擦系数，防止抓取时滑落
+          condim=6：启用完整 6D 接触（包括扭矩方向摩擦，有助于稳定夹持）
+      -->
+      <geom name="block_geom" type="cylinder"
+            size="0.018 0.025"
+            material="block_mat"
+            condim="6"
+            solimp="0.85 0.95 0.001" solref="0.02 1.0"
+            friction="3.0 1.0 0.1"/>
+      <site name="block_center" size="0.001"/>
+    </body>
+
+    <!-- 第二个参考物块（固定） -->
+    <body name="ref_block" pos="0.42 -0.10 0.785">
+      <geom name="ref_block_geom" type="box"
+            size="0.03 0.03 0.015"
+            rgba="0.6 0.3 0.1 1"
+            condim="6"
+            solimp="2 1 0.01" solref="0.005 1"
+            friction="1 0.005 0.0001"/>
+    </body>
+
+    <!-- 相机 -->
+    <camera name="overview" pos="0.8 -0.8 1.5" xyaxes="0.7 0.7 0 -0.3 0.3 0.9"/>
+    <camera name="front" pos="0.3 -1.0 1.0" xyaxes="1 0 0 0 0.3 0.95"/>
+    <camera name="top" pos="0.3 0 1.8" xyaxes="1 0 0 0 1 0"/>
+
+  </worldbody>
+
+  <!-- ============================================================ -->
+  <!-- 执行器 -->
+  <!-- ============================================================ -->
+  <actuator>
+    <!-- 6 个力矩执行器（阻抗控制） -->
+    <motor name="motor1" joint="joint1" forcelimited="true" forcerange="-24 24"/>
+    <motor name="motor2" joint="joint2" forcelimited="true" forcerange="-24 24"/>
+    <motor name="motor3" joint="joint3" forcelimited="true" forcerange="-24 24"/>
+    <motor name="motor4" joint="joint4" forcelimited="true" forcerange="-8 8"/>
+    <motor name="motor5" joint="joint5" forcelimited="true" forcerange="-8 8"/>
+    <motor name="motor6" joint="joint6" forcelimited="true" forcerange="-8 8"/>
+
+    <!--
+      夹爪位置控制（通过 tendon）
+      ctrl=0     → 闭合（两指居中）
+      ctrl=0.0366 → 全开（两指分开 ±36.6mm）
+      kp=200：足够刚硬防止手腕运动时手指漂移
+    -->
+    <position name="gripper" tendon="gripper_gear"
+              ctrllimited="true" ctrlrange="0 0.0366"
+              kp="200" forcelimited="true" forcerange="-10 10"/>
+  </actuator>
+
+  <!-- ============================================================ -->
+  <!-- 肌腱（夹爪联动）— 来自官方 appendix，两指同向 coef=+0.5 -->
+  <!-- ============================================================ -->
+  <tendon>
+    <!--
+      gripper_gear：两指均使用 coef=+0.5
+      结合 equality 约束（g2_left = g2_right），
+      ctrl 值即为每个关节的目标位移量
+    -->
+    <fixed name="gripper_gear">
+      <joint joint="g2_left_joint"  coef="0.5"/>
+      <joint joint="g2_right_joint" coef="0.5"/>
+    </fixed>
+  </tendon>
+
+  <!-- ============================================================ -->
+  <!-- 等式约束（来自官方 appendix） -->
+  <!-- 两指联动：g2_left_joint = g2_right_joint -->
+  <!-- ============================================================ -->
+  <equality>
+    <joint joint1="g2_left_joint" joint2="g2_right_joint"
+           polycoef="0 1 0 0 0"/>
+  </equality>
+
+  <!-- ============================================================ -->
+  <!-- 碰撞排除 -->
+  <!-- ============================================================ -->
+  <contact>
+    <exclude body1="arm_base" body2="link2"/>
+  </contact>
+
+  <!-- ============================================================ -->
+  <!-- 传感器 -->
+  <!-- ============================================================ -->
+  <sensor>
+    <!-- 关节位置 -->
+    <jointpos name="joint1_pos" joint="joint1"/>
+    <jointpos name="joint2_pos" joint="joint2"/>
+    <jointpos name="joint3_pos" joint="joint3"/>
+    <jointpos name="joint4_pos" joint="joint4"/>
+    <jointpos name="joint5_pos" joint="joint5"/>
+    <jointpos name="joint6_pos" joint="joint6"/>
+    <tendonpos name="gripper_pos" tendon="gripper_gear"/>
+
+    <!-- 关节速度 -->
+    <jointvel name="joint1_vel" joint="joint1"/>
+    <jointvel name="joint2_vel" joint="joint2"/>
+    <jointvel name="joint3_vel" joint="joint3"/>
+    <jointvel name="joint4_vel" joint="joint4"/>
+    <jointvel name="joint5_vel" joint="joint5"/>
+    <jointvel name="joint6_vel" joint="joint6"/>
+
+    <!-- 关节力矩 -->
+    <jointactuatorfrc name="joint1_torque" joint="joint1"/>
+    <jointactuatorfrc name="joint2_torque" joint="joint2"/>
+    <jointactuatorfrc name="joint3_torque" joint="joint3"/>
+    <jointactuatorfrc name="joint4_torque" joint="joint4"/>
+    <jointactuatorfrc name="joint5_torque" joint="joint5"/>
+    <jointactuatorfrc name="joint6_torque" joint="joint6"/>
+
+    <!-- 末端位姿（相对 arm_base） -->
+    <framepos  name="endpoint_pos"  objtype="site" objname="endpoint"
+               reftype="site" refname="armbase"/>
+    <framequat name="endpoint_quat" objtype="site" objname="endpoint"
+               reftype="site" refname="armbase"/>
+    <framelinvel name="endpoint_vel" objtype="site" objname="endpoint"
+                 reftype="site" refname="armbase"/>
+    <gyro         name="endpoint_gyro" site="endpoint"/>
+    <accelerometer name="endpoint_acc"  site="endpoint"/>
+
+    <!-- 指尖触摸传感器 -->
+    <touch name="left_finger_touch"  site="left_finger_tip"/>
+    <touch name="right_finger_touch" site="right_finger_tip"/>
+  </sensor>
+
+  <!-- ============================================================ -->
+  <!-- 初始关键帧 -->
+  <!-- ============================================================ -->
+  <!--
+    qpos 顺序：joint1~6(6), g2_left_joint(1), g2_right_joint(1), block_freejoint(7) = 15
+    ctrl 顺序：motor1~6(6), gripper(1) = 7
+    gripper ctrl=0.0366 → 夹爪全开初始状态
+  -->
+  <keyframe>
+    <key name="home"
+         qpos="0 0 0 0 0 0 0.0366 0.0366
+               0.40 0.0 0.8125 1 0 0 0"
+         ctrl="0 0 0 0 0 0 0.0366"/>
+  </keyframe>
+
+</mujoco>

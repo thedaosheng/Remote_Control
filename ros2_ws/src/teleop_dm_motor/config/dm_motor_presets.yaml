@@ -1,0 +1,42 @@
+# 5 档跟手感预设 (参考 dm_motor/PRESETS.md)
+# dm_motor_controller_node 启动时加载, preset 参数变化时按这里查表批量更新
+
+L1:  # 安全档 - 第一次跑 / 演示, 0 风险
+  kp: 8.0
+  kd: 1.2
+  rate_limit_dps: 100.0
+  feedforward_enabled: false
+  ff_gain: 0.0
+  ff_ema_alpha: 0.3
+
+L2:  # 温和档 - 日常调试
+  kp: 15.0
+  kd: 1.2
+  rate_limit_dps: 200.0
+  feedforward_enabled: true
+  ff_gain: 0.5
+  ff_ema_alpha: 0.3
+
+L3:  # 默认档 ⭐ - 推荐起步
+  kp: 20.0
+  kd: 1.0
+  rate_limit_dps: 300.0
+  feedforward_enabled: true
+  ff_gain: 1.0
+  ff_ema_alpha: 0.5
+
+L4:  # 跟手档 - 日常推荐
+  kp: 25.0
+  kd: 1.0
+  rate_limit_dps: 500.0
+  feedforward_enabled: true
+  ff_gain: 1.2
+  ff_ema_alpha: 0.7
+
+L5:  # 激进档 - 极限测试 (有震动风险)
+  kp: 30.0
+  kd: 0.8
+  rate_limit_dps: 600.0
+  feedforward_enabled: true
+  ff_gain: 1.5
+  ff_ema_alpha: 0.8

@@ -1,0 +1,44 @@
+# controller_manager 配置
+# joint_state_broadcaster — 广播所有关节状态到 /joint_states
+# forward_command_controller — 接收 Float64MultiArray 直接下发位置指令
+
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    forward_command_controller:
+      type: forward_command_controller/ForwardCommandController
+
+# forward_command_controller 控制 18 个位置关节：
+#   左臂 8 (joint1~6 + 夹爪左右指) + 右臂 8 + 云台 2
+#   轮子用 velocity 接口，不走 forward_command_controller
+forward_command_controller:
+  ros__parameters:
+    joints:
+      - left_joint1
+      - left_joint2
+      - left_joint3
+      - left_joint4
+      - left_joint5
+      - left_joint6
+      - left_joint7
+      - left_joint8
+      - right_joint1
+      - right_joint2
+      - right_joint3
+      - right_joint4
+      - right_joint5
+      - right_joint6
+      - right_joint7
+      - right_joint8
+      - lift_joint
+      - rentou_joint1
+      - rentou_joint2
+      - fl_steer_joint
+      - fr_steer_joint
+      - rl_steer_joint
+      - rr_steer_joint
+    interface_name: position
