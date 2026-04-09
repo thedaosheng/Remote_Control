@@ -76,17 +76,23 @@
       <position kp="200" kv="10" forcerange="-100 100"/>
     </default>
 
-    <!-- 驱动关节默认值（连续旋转，无限位）-->
+    <!-- 驱动关节默认值 — 纯视觉旋转
+         ★ 混合驱动方案: 底盘推进力直接施加到 chassis body,
+           drive 关节仅用于可视化轮子旋转，不依赖接触摩擦传动。
+         ★ MuJoCo 球体/地面 velocity actuator 在非前进方向
+           存在接触力锁死限制，混合驱动彻底绕过此问题。 -->
     <default class="drive">
-      <joint type="hinge" axis="0 1 0" damping="0.01" frictionloss="0.001"/>
-      <velocity kv="20" forcerange="-100 100"/>
+      <joint type="hinge" axis="0 1 0" damping="0.001" frictionloss="0.0"/>
+      <velocity kv="1" forcerange="-5 5"/>
     </default>
 
-    <!-- 轮子几何默认值 - 高摩擦抗漂移 -->
+    <!-- 轮子几何 — 纯视觉, 不参与碰撞
+         底盘运动由 chassis 关节直接驱动, Z 高度由 position actuator 维持。
+         轮子的 steer/drive 仅做视觉同步 (转向角 + 转速)。
+         contype=0 conaffinity=0: 不与任何物体碰撞 -->
     <default class="wheel">
-      <geom type="cylinder" size="0.06 0.02" rgba="0.15 0.15 0.15 1"
-            friction="3.0 0.2 0.02" condim="6"
-            contype="2" conaffinity="4"/>
+      <geom type="sphere" size="0.06" rgba="0.15 0.15 0.15 1"
+            contype="0" conaffinity="0"/>
     </default>
 
     <!-- Airbot 机械臂关节默认值（加大 kp 对抗重力下垂）-->
@@ -206,16 +212,25 @@
 
     <!-- ============== 底盘主体（free joint）============== -->
     <body name="chassis_link" pos="0 0 0.16">
-      <!-- free joint with damping 抗漂移（双臂运动反作用力稳定）-->
-      <joint name="chassis_root" type="free" damping="8"/>
+      <!-- ★ freejoint + 重力阻尼:
+           ★ 4DOF 底盘: slide(X,Y,Z) + hinge(Yaw)
+           MuJoCo 球体接触无法可靠传递舵轮横向驱动力 (已验证),
+           因此底盘运动由 velocity actuator 直接驱动 chassis 关节。
+           轮子 steer 仅做视觉同步, drive 关节保留用于碰撞支撑。
+           这是 dm_control 等移动机器人仿真的标准做法。 -->
+      <!-- 3DOF 底盘: X/Y 平移 + Yaw 旋转, 无 Z 自由度（高度由 body pos 固定）-->
+      <joint name="chassis_x" type="slide" axis="1 0 0" damping="0.5"/>
+      <joint name="chassis_y" type="slide" axis="0 1 0" damping="0.5"/>
+      <joint name="chassis_yaw" type="hinge" axis="0 0 1" damping="0.3"/>
 
       <!-- 底盘惯性（加大质量 50kg = 真实 AGV 量级）-->
       <inertial pos="0 0 -0.02" mass="50.0" diaginertia="3.0 3.5 4.5"/>
 
       <!-- AGV 底盘（深灰色）-->
+      <!-- 底盘纯视觉（直接驱动方案不需要碰撞）-->
       <geom name="chassis_box" type="box" size="0.21 0.20 0.04"
             rgba="0.18 0.18 0.18 1"
-            contype="1" conaffinity="0"/>
+            contype="0" conaffinity="0"/>
 
       <!-- 前方红色标记 -->
       <geom name="chassis_front" type="box" size="0.02 0.05 0.02"
@@ -232,9 +247,9 @@
         初始位置：torso 底部贴在 chassis 顶部 (z=0.04 相对底盘中心)
       -->
       <body name="torso_link" pos="0 0 0.04">
-        <!-- 升降关节：适度阻尼，防振荡但保证响应速度 -->
+        <!-- 升降关节：高阻尼 + 高摩擦抑制微振荡 -->
         <joint name="lift_joint" type="slide" axis="0 0 1" range="0 0.8"
-               damping="20" frictionloss="1.5"/>
+               damping="60" frictionloss="3.0"/>
         <inertial pos="0 0 0.20" mass="8.0" diaginertia="0.8 0.8 0.4"/>
 
         <!-- 蓝色躯干长方体 (25cm × 25cm × 40cm, 降低高度使双臂接近桌面) -->
@@ -441,9 +456,9 @@
         <geom type="cylinder" size="0.035 0.03" rgba="0.4 0.4 0.45 1" contype="0" conaffinity="0"/>
 
         <body name="fl_wheel_link" pos="0 0 -0.06">
-          <inertial pos="0 0 0" mass="0.8" diaginertia="0.001 0.002 0.001"/>
+          <inertial pos="0 0 0" mass="0.8" diaginertia="0.003 0.003 0.003"/>
           <joint name="fl_drive" class="drive"/>
-          <geom name="fl_wheel" class="wheel" euler="0 1.5708 0"/>
+          <geom name="fl_wheel" class="wheel"/>
         </body>
       </body>
 
@@ -454,9 +469,9 @@
         <geom type="cylinder" size="0.035 0.03" rgba="0.4 0.4 0.45 1" contype="0" conaffinity="0"/>
 
         <body name="fr_wheel_link" pos="0 0 -0.06">
-          <inertial pos="0 0 0" mass="0.8" diaginertia="0.001 0.002 0.001"/>
+          <inertial pos="0 0 0" mass="0.8" diaginertia="0.003 0.003 0.003"/>
           <joint name="fr_drive" class="drive"/>
-          <geom name="fr_wheel" class="wheel" euler="0 1.5708 0"/>
+          <geom name="fr_wheel" class="wheel"/>
         </body>
       </body>
 
@@ -467,9 +482,9 @@
         <geom type="cylinder" size="0.035 0.03" rgba="0.4 0.4 0.45 1" contype="0" conaffinity="0"/>
 
         <body name="rl_wheel_link" pos="0 0 -0.06">
-          <inertial pos="0 0 0" mass="0.8" diaginertia="0.001 0.002 0.001"/>
+          <inertial pos="0 0 0" mass="0.8" diaginertia="0.003 0.003 0.003"/>
           <joint name="rl_drive" class="drive"/>
-          <geom name="rl_wheel" class="wheel" euler="0 1.5708 0"/>
+          <geom name="rl_wheel" class="wheel"/>
         </body>
       </body>
 
@@ -480,9 +495,9 @@
         <geom type="cylinder" size="0.035 0.03" rgba="0.4 0.4 0.45 1" contype="0" conaffinity="0"/>
 
         <body name="rr_wheel_link" pos="0 0 -0.06">
-          <inertial pos="0 0 0" mass="0.8" diaginertia="0.001 0.002 0.001"/>
+          <inertial pos="0 0 0" mass="0.8" diaginertia="0.003 0.003 0.003"/>
           <joint name="rr_drive" class="drive"/>
-          <geom name="rr_wheel" class="wheel" euler="0 1.5708 0"/>
+          <geom name="rr_wheel" class="wheel"/>
         </body>
       </body>
 
@@ -491,22 +506,37 @@
 
   <!-- ===================== 执行器 ===================== -->
   <actuator>
-    <!-- 转向位置控制（舵机式，目标角度）-->
+    <!-- ★ 执行器索引表 (共 28 个):
+         0-2:  底盘 vx/vy/omega (velocity)
+         3-6:  舵轮转向 fl/fr/rl/rr (position, 视觉)
+         7-10: 驱动转速 fl/fr/rl/rr (velocity, 视觉)
+         11:   升降 lift (position)
+         12-17: 左臂 j1-j6 (position)
+         18-23: 右臂 j1-j6 (motor/torque)
+         24-26: 云台 yaw/pitch/stem (position)
+         27:   右夹爪 (position) -->
+    <!-- 底盘 3DOF 直接驱动 (无 Z 轴, 高度由刚体约束固定) -->
+    <velocity name="chassis_vx_act" joint="chassis_x" kv="200" forcerange="-500 500"/>
+    <velocity name="chassis_vy_act" joint="chassis_y" kv="200" forcerange="-500 500"/>
+    <velocity name="chassis_omega_act" joint="chassis_yaw" kv="50" forcerange="-100 100"/>
+
+    <!-- 转向位置控制（视觉同步, 舵轮角度跟随 IK）-->
     <position class="steer" name="fl_steer_act" joint="fl_steer"/>
     <position class="steer" name="fr_steer_act" joint="fr_steer"/>
     <position class="steer" name="rl_steer_act" joint="rl_steer"/>
     <position class="steer" name="rr_steer_act" joint="rr_steer"/>
 
-    <!-- 驱动速度控制（目标角速度 rad/s）-->
+    <!-- 驱动速度控制（视觉同步, 轮子转速匹配地速）-->
     <velocity class="drive" name="fl_drive_act" joint="fl_drive"/>
     <velocity class="drive" name="fr_drive_act" joint="fr_drive"/>
     <velocity class="drive" name="rl_drive_act" joint="rl_drive"/>
     <velocity class="drive" name="rr_drive_act" joint="rr_drive"/>
 
     <!-- 升降位置控制 (目标高度 m)，索引 8 -->
-    <!-- 升降：高 kp 减少稳态误差 + 高阻尼防振荡 -->
-    <position name="lift_act" joint="lift_joint" kp="5000" kv="350"
-              forcerange="-1000 1000" ctrlrange="0 0.8"/>
+    <!-- 升降：强过阻尼 (ζ≈1.7)，kv=800 彻底消除振荡 -->
+    <!-- kp=20000 补偿 ~20kg 负载重力 (err < 1cm), kv=1200 过阻尼无振荡 -->
+    <position name="lift_act" joint="lift_joint" kp="20000" kv="1200"
+              forcerange="-5000 5000" ctrlrange="0 0.8"/>
 
     <!-- 左臂 6 关节 (索引 9~14) -->
     <position class="arm_joint" name="left_j1_act" joint="left_joint1"/>
@@ -526,9 +556,9 @@
 
     <!-- 头部云台 yaw + pitch + 高度 slide (索引 21~23) -->
     <position name="head_yaw_act"   joint="head_yaw_joint"
-              kp="200" kv="8" forcerange="-30 30" ctrlrange="-1.5708 1.5708"/>
+              kp="500" kv="15" forcerange="-100 100" ctrlrange="-1.5708 1.5708"/>
     <position name="head_pitch_act" joint="head_pitch_joint"
-              kp="200" kv="8" forcerange="-30 30" ctrlrange="-0.7854 0.7854"/>
+              kp="500" kv="15" forcerange="-100 100" ctrlrange="-0.7854 0.7854"/>
     <position name="head_stem_act"  joint="head_stem"
               kp="1500" kv="60" forcerange="-200 200" ctrlrange="-0.05 0.40"/>
 

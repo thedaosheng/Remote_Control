@@ -88,6 +88,16 @@ CHASSIS_VX_SLEW = 3.0    # m/s^2
 CHASSIS_VY_SLEW = 3.0    # m/s^2
 CHASSIS_OMEGA_SLEW = 6.0 # rad/s^2
 
+# ============== 混合驱动参数 ==============
+# 底盘推进力直接施加到 chassis body (PD 速度控制)
+# 不依赖轮子-地面摩擦传动 — 绕过 MuJoCo 球体接触限制
+CHASSIS_FORCE_KP = 500.0   # N/(m/s) — 速度误差 → 推力
+CHASSIS_FORCE_KD = 50.0    # N/(m/s^2) — 加速度阻尼 (防超调)
+CHASSIS_TORQUE_KP = 200.0  # Nm/(rad/s) — 角速度误差 → 扭矩
+CHASSIS_TORQUE_KD = 20.0   # Nm/(rad/s^2) — 角加速度阻尼
+CHASSIS_MAX_FORCE = 800.0  # N — 最大推力限幅
+CHASSIS_MAX_TORQUE = 300.0 # Nm — 最大扭矩限幅
+
 # 升降参数（降低速度 + 平滑）
 LIFT_MIN = 0.0
 LIFT_MAX = 0.8
@@ -156,6 +166,21 @@ GRIPPER_CLOSE = 0.0     # 全闭位置
 CHASSIS_SPEED = 0.6     # m/s
 CHASSIS_OMEGA = 1.5     # rad/s
 # DECEL_RATE 已废弃 — 改用 CHASSIS_*_SLEW 斜率限幅（见上方参数区）
+
+# ============== 执行器索引映射 (3DOF 底盘, 无 Z 轴) ==============
+# 与 XML <actuator> 顺序一一对应, 共 28 个
+CTRL_CHASSIS_VX    = 0   # velocity: chassis_x
+CTRL_CHASSIS_VY    = 1   # velocity: chassis_y
+CTRL_CHASSIS_OMEGA = 2   # velocity: chassis_yaw
+CTRL_STEER_START   = 3   # 3,4,5,6 — position: fl/fr/rl/rr steer (视觉)
+CTRL_DRIVE_START   = 7   # 7,8,9,10 — velocity: fl/fr/rl/rr drive (视觉)
+CTRL_LIFT          = 11  # position: lift_joint
+CTRL_LEFT_ARM      = 12  # 12~17 (6 个) — position: left_j1-j6
+CTRL_RIGHT_ARM     = 18  # 18~23 (6 个) — motor: right_j1-j6
+CTRL_HEAD_YAW      = 24  # position: head_yaw
+CTRL_HEAD_PITCH    = 25  # position: head_pitch
+CTRL_HEAD_STEM     = 26  # position: head_stem
+CTRL_GRIPPER       = 27  # position: right_gripper
 
 
 # ============== 全局按键状态 ==============
@@ -825,7 +850,7 @@ class TouchTeleop:
             # 未连接：仅重力补偿
             tau = self.compute_impedance_control()
             for i in range(6):
-                self.data.ctrl[15 + i] = tau[i]
+                self.data.ctrl[CTRL_RIGHT_ARM + i] = tau[i]
             return
 
         # 读取笔状态
@@ -858,15 +883,15 @@ class TouchTeleop:
                 print(">>> [夹爪] 张开")
         self.btn1_last = btn1
 
-        # 写入夹爪执行器 (ctrl[24])
-        self.data.ctrl[24] = self.gripper_target
+        # 写入夹爪执行器
+        self.data.ctrl[CTRL_GRIPPER] = self.gripper_target
 
         # ===== 校准后稳定等待 =====
         if self.settle_countdown > 0:
             # 稳定期：只做重力补偿到 home 位置，不跟随笔
             tau = self.compute_impedance_control()
             for i in range(6):
-                self.data.ctrl[15 + i] = tau[i]
+                self.data.ctrl[CTRL_RIGHT_ARM + i] = tau[i]
             self.settle_countdown -= 1
             if self.settle_countdown == 0:
                 # 稳定完成，更新笔原点为当前笔位置（消除漂移）
@@ -877,7 +902,7 @@ class TouchTeleop:
         if not self.calibrated:
             tau = self.compute_impedance_control()
             for i in range(6):
-                self.data.ctrl[15 + i] = tau[i]
+                self.data.ctrl[CTRL_RIGHT_ARM + i] = tau[i]
             return
 
         # ===== 增量位置跟随（★ 动态 workspace_center 跟随底盘）=====
@@ -903,7 +928,7 @@ class TouchTeleop:
         # ===== 阻抗控制 → 关节力矩 =====
         tau = self.compute_impedance_control()
         for i in range(6):
-            self.data.ctrl[15 + i] = tau[i]
+            self.data.ctrl[CTRL_RIGHT_ARM + i] = tau[i]
 
         # ===== 力反馈 → Touch 笔 =====
         contact_force = self.get_contact_forces()
@@ -1056,9 +1081,9 @@ def main():
 
     mujoco.mj_forward(model, data)
     data.ctrl[:] = 0.0
-    data.ctrl[8] = LIFT_INIT
-    data.ctrl[9:15] = ARM_HOME_LEFT
-    data.ctrl[24] = GRIPPER_CLOSE
+    data.ctrl[CTRL_LIFT] = LIFT_INIT
+    data.ctrl[CTRL_LEFT_ARM:CTRL_LEFT_ARM + 6] = ARM_HOME_LEFT
+    data.ctrl[CTRL_GRIPPER] = GRIPPER_CLOSE
 
     # Touch 笔
     touch = TouchTeleop(model, data)
@@ -1068,11 +1093,11 @@ def main():
     # 让物体先 settle + 右臂重力补偿稳定
     print(">>> 物体 settling (1.0s)...")
     for _ in range(500):  # 1.0s @ 0.002s
-        data.ctrl[9:15] = ARM_HOME_LEFT
+        data.ctrl[CTRL_LEFT_ARM:CTRL_LEFT_ARM + 6] = ARM_HOME_LEFT
         tau_init = touch.compute_impedance_control()
         for i in range(6):
-            data.ctrl[15 + i] = tau_init[i]
-        data.ctrl[24] = GRIPPER_CLOSE
+            data.ctrl[CTRL_RIGHT_ARM + i] = tau_init[i]
+        data.ctrl[CTRL_GRIPPER] = GRIPPER_CLOSE
         mujoco.mj_step(model, data)
     print(">>> Settling 完成")
 
@@ -1115,9 +1140,9 @@ def main():
                 data.qpos[:] = init_qpos
                 data.qvel[:] = init_qvel
                 data.ctrl[:] = 0.0
-                data.ctrl[8] = LIFT_INIT
-                data.ctrl[9:15] = ARM_HOME_LEFT
-                data.ctrl[24] = GRIPPER_CLOSE
+                data.ctrl[CTRL_LIFT] = LIFT_INIT
+                data.ctrl[CTRL_LEFT_ARM:CTRL_LEFT_ARM + 6] = ARM_HOME_LEFT
+                data.ctrl[CTRL_GRIPPER] = GRIPPER_CLOSE
 
                 target_vx = target_vy = target_omega = 0.0
                 target_lift = LIFT_INIT
@@ -1126,6 +1151,7 @@ def main():
                 target_head_stem = 0.0
                 current_steer[:] = 0.0
                 current_drive[:] = 0.0
+                data.xfrc_applied[:] = 0.0  # 清除所有外力
                 touch.reset()
 
                 mujoco.mj_forward(model, data)
@@ -1135,50 +1161,53 @@ def main():
             # 1. 更新速度/位置目标
             update_target_velocity(model.opt.timestep)
 
-            # 2. 舵轮 IK（WPILib / FRC 最佳实践 pipeline）
-            #    步骤: IK → 去饱和 → 角度优化 → 余弦补偿 → 速率限幅
+            # 2. 舵轮 IK + 混合驱动
+            #    ★ 混合驱动方案:
+            #      - 转向: 仍通过 steer position actuator 物理控制
+            #      - 驱动: drive joint 仅视觉旋转，实际推力施加到 chassis body
+            #      - 原因: MuJoCo 球体 velocity actuator 横向接触力锁死
             dt = model.opt.timestep
 
             # 2a. 逆运动学: 底盘速度 → 4 轮 (角度, 速度)
             raw_steer, raw_drive = swerve_ik(
                 target_vx, target_vy, target_omega, current_steer
             )
-
-            # 2b. 轮速去饱和: 超速时等比缩放，保持轨迹正确
             raw_drive = desaturate_wheel_speeds(raw_drive, MAX_WHEEL_SPEED)
 
-            # 2c. 逐轮优化 + 余弦补偿 + 速率限幅
+            # 2b. 转向 + 视觉驱动
             cmd_steer = np.zeros(4)
             cmd_drive = np.zeros(4)
             for i in range(4):
-                # optimize: >90° 时反转驱动 + 翻转角度（轮子不用转超过 90°）
                 opt_speed, opt_angle = optimize_module(
                     raw_drive[i], raw_steer[i], current_steer[i]
                 )
-                # cosine: 轮子还没转到位时减小驱动力（防止侧向漂移）
-                opt_speed = cosine_scale(opt_speed, opt_angle, current_steer[i])
-                # 转向速率限幅: 每步最多转 STEER_RATE_LIMIT * dt 弧度
                 cmd_steer[i] = rate_limit_steer(
                     opt_angle, current_steer[i], STEER_RATE_LIMIT, dt
                 )
-                # 驱动加速度限幅: 每步速度变化不超过 DRIVE_ACCEL_LIMIT * dt
                 cmd_drive[i] = rate_limit_drive(
                     opt_speed, current_drive[i], DRIVE_ACCEL_LIMIT, dt
                 )
-
-            # 2d. 更新状态记忆
             current_steer[:] = cmd_steer
             current_drive[:] = cmd_drive
 
+            # 2c. ★ 底盘驱动: velocity actuator 直接控制 chassis 关节
+            #     XML 中 chassis_x/y/yaw 是 slide/hinge 关节，
+            #     velocity actuator 的 target 就是期望速度 (m/s 或 rad/s)。
+            #     MuJoCo 内部: force = kv * (target - actual_vel)
+            #     轮子 contype=0 不碰撞，底盘运动完全由这 3 个 actuator 驱动。
+            data.ctrl[CTRL_CHASSIS_VX] = target_vx
+            data.ctrl[CTRL_CHASSIS_VY] = target_vy
+            data.ctrl[CTRL_CHASSIS_OMEGA] = target_omega
+
             # 3. 写入执行器
-            data.ctrl[0:4] = cmd_steer         # 转向（平滑后）
-            data.ctrl[4:8] = cmd_drive         # 驱动（平滑后）
-            data.ctrl[8] = smoothed_lift        # ★ 使用平滑后的升降目标
-            data.ctrl[9:15] = ARM_HOME_LEFT     # 左臂 home
-            touch.update()                       # 右臂+夹爪 → ctrl[15:21]+ctrl[24]
-            data.ctrl[21] = target_head_yaw     # 云台
-            data.ctrl[22] = target_head_pitch
-            data.ctrl[23] = target_head_stem
+            data.ctrl[CTRL_STEER_START:CTRL_STEER_START + 4] = cmd_steer  # 转向（视觉同步）
+            data.ctrl[CTRL_DRIVE_START:CTRL_DRIVE_START + 4] = cmd_drive  # 驱动（视觉旋转）
+            data.ctrl[CTRL_LIFT] = smoothed_lift                           # ★ 使用平滑后的升降目标
+            data.ctrl[CTRL_LEFT_ARM:CTRL_LEFT_ARM + 6] = ARM_HOME_LEFT    # 左臂 home
+            touch.update()                                                  # 右臂+夹爪 → ctrl[19:25]+ctrl[28]
+            data.ctrl[CTRL_HEAD_YAW] = target_head_yaw                    # 云台
+            data.ctrl[CTRL_HEAD_PITCH] = target_head_pitch
+            data.ctrl[CTRL_HEAD_STEM] = target_head_stem
 
             # 4. 物理步进
             mujoco.mj_step(model, data)
