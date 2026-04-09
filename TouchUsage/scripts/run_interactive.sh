@@ -126,4 +126,6 @@ echo "  (诊断日志: $LOG)"
 echo ""
 sleep 1
 
-LD_LIBRARY_PATH=/tmp/patched_lib:/tmp/fakelibs:/usr/lib exec /tmp/force_interactive
+LD_PRELOAD=/tmp/patched_lib/libPhantomIOLib42.so:/tmp/fakelibs/libncurses.so.5 \
+LD_LIBRARY_PATH=/tmp/patched_lib:/tmp/fakelibs:/usr/lib \
+exec /tmp/force_interactive

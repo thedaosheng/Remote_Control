@@ -160,7 +160,9 @@ echo -e "${GREEN}OK${NC}"
 
 # === 5. 快速验证 ===
 echo -n "[5/5] 验证设备通信... "
-LD_LIBRARY_PATH=/tmp/patched_lib:/tmp/fakelibs:/usr/lib timeout 8 /tmp/force_background > /dev/null 2>&1 &
+LD_PRELOAD=/tmp/patched_lib/libPhantomIOLib42.so:/tmp/fakelibs/libncurses.so.5 \
+LD_LIBRARY_PATH=/tmp/patched_lib:/tmp/fakelibs:/usr/lib \
+timeout 8 /tmp/force_background > /dev/null 2>&1 &
 PID=$!
 sleep 5
 if [ -f /tmp/force_status ]; then

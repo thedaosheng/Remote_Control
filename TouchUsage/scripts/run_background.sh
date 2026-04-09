@@ -20,7 +20,9 @@ RESET_OUT=$(bash "$BASE/scripts/reset_device.sh" 2>&1)
 echo "$RESET_OUT"
 
 # 后台启动
-LD_LIBRARY_PATH=/tmp/patched_lib:/tmp/fakelibs:/usr/lib nohup /tmp/force_background > /dev/null 2>&1 &
+LD_PRELOAD=/tmp/patched_lib/libPhantomIOLib42.so:/tmp/fakelibs/libncurses.so.5 \
+LD_LIBRARY_PATH=/tmp/patched_lib:/tmp/fakelibs:/usr/lib \
+nohup /tmp/force_background > /dev/null 2>&1 &
 PID=$!
 sleep 3
 
