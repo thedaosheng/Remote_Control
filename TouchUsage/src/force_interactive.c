@@ -89,7 +89,7 @@ static volatile long g_ticks = 0;
 static volatile int g_mode = 0;
 static volatile double g_out_f[3];
 
-#define MAX_FORCE 5.0  /* 逆向测试: 设备硬件可能支持 ~8N 峰值 */
+#define MAX_FORCE 10.0  /* 逆向测试: 设备硬件可能支持 ~8N 峰值 */
 static void clamp(double f[3]) {
     double m = sqrt(f[0]*f[0]+f[1]*f[1]+f[2]*f[2]);
     if (m > MAX_FORCE) { double s=MAX_FORCE/m; f[0]*=s; f[1]*=s; f[2]*=s; }

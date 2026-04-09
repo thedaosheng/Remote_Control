@@ -60,7 +60,7 @@ static volatile long g_ticks=0;
 static volatile int g_mode=0;
 static FILE* g_log=NULL;
 #define LOG(fmt,...) do{if(g_log){fprintf(g_log,fmt "\n",##__VA_ARGS__);fflush(g_log);}}while(0)
-#define MAX_FORCE 2.5
+#define MAX_FORCE 10.0
 static double vlen(const double v[3]){return sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);}
 static void clamp(double f[3]){double m=vlen(f);if(m>MAX_FORCE){double s=MAX_FORCE/m;f[0]*=s;f[1]*=s;f[2]*=s;}}
 
