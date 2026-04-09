@@ -68,19 +68,37 @@ static void clamp(double f[3]){double m=vlen(f);if(m>MAX_FORCE){double s=MAX_FOR
 #define CX 0.0
 #define CY (-100.0)
 #define CZ (-170.0)
-#define WALL_Y (-130.0)
+/* 立方体 */
+#define BOX_X 0.0
+#define BOX_Y (-50.0)
+#define BOX_Z (-200.0)
+#define BOX_HALF 25.0
+#define BOX_K 0.5
 
 /* === 8 种力渲染 (参数与 force_interactive.c 同步) === */
 static void f0(const double p[3],const double v[3],double f[3]){f[0]=f[1]=f[2]=0;}
 static void f1(const double p[3],const double v[3],double f[3]){
-    f[0]=f[1]=f[2]=0; if(p[1]<WALL_Y) f[1]=0.4*(WALL_Y-p[1]);}
+    f[0]=f[1]=f[2]=0;
+    double dx=p[0]-BOX_X,dy=p[1]-BOX_Y,dz=p[2]-BOX_Z,h=BOX_HALF;
+    if(dx>-h&&dx<h&&dy>-h&&dy<h&&dz>-h&&dz<h){
+        double pens[6]={h-dx,dx+h,h-dy,dy+h,h-dz,dz+h};
+        int face=0; double mp=pens[0];
+        for(int i=1;i<6;i++){if(pens[i]<mp){mp=pens[i];face=i;}}
+        double fm=BOX_K*mp;
+        switch(face){
+            case 0:f[0]=fm;break; case 1:f[0]=-fm;break;
+            case 2:f[1]=fm;break; case 3:f[1]=-fm;break;
+            case 4:f[2]=fm;break; case 5:f[2]=-fm;break;
+        }
+    }
+}
 static void f2(const double p[3],const double v[3],double f[3]){
     double k=0.010,b=0.001;
     f[0]=-k*(p[0]-CX)-b*v[0]; f[1]=-k*(p[1]-CY)-b*v[1]; f[2]=-k*(p[2]-CZ)-b*v[2];}
 static void f3(const double p[3],const double v[3],double f[3]){
     double e=0.008; f[0]=-e*v[0]; f[1]=-e*v[1]; f[2]=-e*v[2];}
 static void f4(const double p[3],const double v[3],double f[3]){
-    f[0]=f[1]=f[2]=0; if(p[1]<WALL_Y){double fn=0.6*(WALL_Y-p[1]);f[1]=fn;
+    f[0]=f[1]=f[2]=0; double wall=BOX_Y-BOX_HALF; if(p[1]<wall){double fn=0.6*(wall-p[1]);f[1]=fn;
     double vt=sqrt(v[0]*v[0]+v[2]*v[2]);if(vt>1.0){double fr=0.5*fn;f[0]-=fr*v[0]/vt;f[2]-=fr*v[2]/vt;}}}
 static void f5(const double p[3],const double v[3],double f[3]){
     f[0]=f[1]=f[2]=0; double rx=CX-p[0],ry=CY-p[1],rz=CZ-p[2];double d=sqrt(rx*rx+ry*ry+rz*rz);
@@ -90,7 +108,7 @@ static void f6(const double p[3],const double v[3],double f[3]){
     f[0]=f[1]=f[2]=0; double rx=CX-p[0],ry=CY-p[1],rz=CZ-p[2];double d=sqrt(rx*rx+ry*ry+rz*rz);
     if(d<5)d=5;if(d>120)return;double fm=1500.0/(d*d);f[0]=fm*rx/d;f[1]=fm*ry/d;f[2]=fm*rz/d;}
 static void f7(const double p[3],const double v[3],double f[3]){
-    f[0]=f[1]=f[2]=0; if(p[1]<WALL_Y){f[1]=0.4*(WALL_Y-p[1])+0.5*sin(2.0*M_PI*p[0]/10.0);}}
+    f[0]=f[1]=f[2]=0; double wall=BOX_Y-BOX_HALF; if(p[1]<wall){f[1]=0.4*(wall-p[1])+0.5*sin(2.0*M_PI*p[0]/10.0);}}
 static void f8(const double p[3],const double v[3],double f[3]){
     f[0]=f[1]=f[2]=0; double k=0.15,hw=15.0;
     double dy=p[1]-CY; if(dy>hw)f[1]=-k*(dy-hw);if(dy<-hw)f[1]=-k*(dy+hw);

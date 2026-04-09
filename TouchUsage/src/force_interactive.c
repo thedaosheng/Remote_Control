@@ -100,25 +100,68 @@ static void clamp(double f[3]) {
 /*
  * 真实工作空间 (手持笔自然移动时的实测范围):
  *   X: -77 ~ +38 mm   中心 ≈ 0
- *   Y: -213 ~ -8 mm   中心 ≈ -100   (全程负值! Y 越大=越高)
- *   Z: -249 ~ -77 mm  中心 ≈ -170   (全程负值! Z 越大=越靠近用户)
+ *   Y: -213 ~ -8 mm   中心 ≈ -100   (Y 越大=越高)
+ *   Z: -249 ~ -77 mm  中心 ≈ -170   (Z 越大=越靠近用户)
  *
- * 工作空间中心: (0, -100, -170)
+ * 用户偏好操作区: Y ≈ -50, Z ≈ -200
+ * 详见 workspace_calibration.md
  */
 #define CX 0.0
 #define CY (-100.0)
 #define CZ (-170.0)
 
-/* 刚度墙高度: 手持中位偏下一点，从上往下压能碰到 */
-#define WALL_Y (-130.0)
+/* 立方体中心: 用户偏好的舒适位置 */
+#define BOX_X 0.0
+#define BOX_Y (-50.0)
+#define BOX_Z (-200.0)
+#define BOX_HALF 25.0  /* 半边长 25mm → 50mm 立方体 */
+#define BOX_K 0.5      /* 刚度 N/mm */
 
 static void calc_force(int mode, const double p[3], const double v[3], double f[3]) {
     f[0]=f[1]=f[2]=0;
     switch(mode) {
     case 0: break; /* OFF */
 
-    case 1: /* 刚度墙: 从上往下压碰到硬面, 越压越硬, 往上抬就自由 */
-        if(p[1] < WALL_Y) f[1] = 0.4 * (WALL_Y - p[1]);
+    case 1: /* 立方体: 从外面探入能感受到 6 个面 */
+        {
+            /* 计算笔尖到立方体各面的距离, 如果在内部则推出最近的面 */
+            double dx = p[0] - BOX_X;  /* 相对立方体中心 */
+            double dy = p[1] - BOX_Y;
+            double dz = p[2] - BOX_Z;
+            double h = BOX_HALF;
+
+            /* 只有在立方体内部才产生力 */
+            if (dx > -h && dx < h && dy > -h && dy < h && dz > -h && dz < h) {
+                /* 找到最近的面, 推出去 */
+                double pen_xp = h - dx;   /* 到 +X 面的距离 */
+                double pen_xn = dx + h;   /* 到 -X 面的距离 */
+                double pen_yp = h - dy;   /* 到 +Y 面 (顶) */
+                double pen_yn = dy + h;   /* 到 -Y 面 (底) */
+                double pen_zp = h - dz;   /* 到 +Z 面 (前) */
+                double pen_zn = dz + h;   /* 到 -Z 面 (后) */
+
+                /* 找最小侵入深度对应的面 */
+                double min_pen = pen_xp;
+                int face = 0; /* 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z */
+
+                if (pen_xn < min_pen) { min_pen = pen_xn; face = 1; }
+                if (pen_yp < min_pen) { min_pen = pen_yp; face = 2; }
+                if (pen_yn < min_pen) { min_pen = pen_yn; face = 3; }
+                if (pen_zp < min_pen) { min_pen = pen_zp; face = 4; }
+                if (pen_zn < min_pen) { min_pen = pen_zn; face = 5; }
+
+                /* 从最近的面推出 */
+                double force_mag = BOX_K * min_pen;
+                switch(face) {
+                    case 0: f[0] =  force_mag; break; /* 推向 +X */
+                    case 1: f[0] = -force_mag; break; /* 推向 -X */
+                    case 2: f[1] =  force_mag; break; /* 推向 +Y (上) */
+                    case 3: f[1] = -force_mag; break; /* 推向 -Y (下) */
+                    case 4: f[2] =  force_mag; break; /* 推向 +Z (前) */
+                    case 5: f[2] = -force_mag; break; /* 推向 -Z (后) */
+                }
+            }
+        }
         break;
 
     case 2: /* 弹簧回中: 拉向工作空间中心 */
@@ -133,16 +176,18 @@ static void calc_force(int mode, const double p[3], const double v[3], double f[
           f[0]=-e*v[0]; f[1]=-e*v[1]; f[2]=-e*v[2]; }
         break;
 
-    case 4: /* 表面摩擦: 在 WALL_Y 处碰面后水平滑动有摩擦 */
-        if(p[1] < WALL_Y) {
-            double fn = 0.6*(WALL_Y - p[1]);
-            f[1] = fn;  /* 法向力向上 */
+    case 4: /* 表面摩擦: 在 Y=-50 处碰面后水平滑动有摩擦 */
+        { double wall = BOX_Y - BOX_HALF;  /* 立方体底面位置 */
+          if(p[1] < wall) {
+            double fn = 0.6*(wall - p[1]);
+            f[1] = fn;
             double vt = sqrt(v[0]*v[0] + v[2]*v[2]);
             if(vt > 1.0) {
                 double fr = 0.5 * fn;
                 f[0] -= fr*v[0]/vt;
                 f[2] -= fr*v[2]/vt;
             }
+          }
         }
         break;
 
@@ -163,15 +208,17 @@ static void calc_force(int mode, const double p[3], const double v[3], double f[
           f[0]=fm*rx/d; f[1]=fm*ry/d; f[2]=fm*rz/d; }
         break;
 
-    case 7: /* 振动纹理: 下压碰面后左右滑动有搓衣板感 */
-        if(p[1] < WALL_Y) {
-            double base = 0.4*(WALL_Y - p[1]);
+    case 7: /* 振动纹理: 立方体顶面 + 左右滑动搓衣板感 */
+        { double wall = BOX_Y - BOX_HALF;
+          if(p[1] < wall) {
+            double base = 0.4*(wall - p[1]);
             double tex = 0.5*sin(2.0*M_PI*p[0]/10.0);
             f[1] = base + tex;
+          }
         }
         break;
 
-    case 8: /* 引导槽: 只能沿 X 轴(左右)自由移动, Y/Z 偏离中心有恢复力 */
+    case 8: /* 引导槽: 只能沿 X 轴(左右)自由移动 */
         { double k=0.15, hw=15.0;
           double dy = p[1] - CY;
           if(dy >  hw) f[1] = -k*(dy - hw);
@@ -184,8 +231,8 @@ static void calc_force(int mode, const double p[3], const double v[3], double f[
 }
 
 static const char* MODE_NAMES[] = {
-    "OFF   关闭","WALL  刚度墙","SPRING 弹簧","VISC  粘滞",
-    "FRIC  摩擦","MAG   磁吸","GRAV  重力井","TEX   纹理","CHAN  引导槽"
+    "OFF   关闭","CUBE  立方体(50mm,探入感受6面)","SPRING 弹簧回中","VISC  粘滞蜂蜜",
+    "FRIC  摩擦面","MAG   磁吸","GRAV  重力井","TEX   纹理搓衣板","CHAN  引导槽"
 };
 
 /* ===== Servo 回调 (与 touch_demo 结构一致) ===== */
