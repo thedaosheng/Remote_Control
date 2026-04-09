@@ -265,58 +265,24 @@ int main(void) {
     LOG("  handle=%u (0x%x), error=0x%x/%d", g_hHD, g_hHD, e.errorCode, e.internalCode);
 
     if(g_hHD == HD_INVALID_HANDLE) {
-        LOG("INIT FAILED (0x%x/%d), attempting auto-recovery...", e.errorCode, e.internalCode);
+        LOG("INIT FAILED (0x%x/%d), attempting recovery via reset_device.sh", e.errorCode, e.internalCode);
         fprintf(stderr,"\n⚠️  初始化失败 (0x%x), 尝试自动恢复...\n", e.errorCode);
 
-        /* 自动恢复: 找到 Touch 的 ttyACM, 发 serial break 重置设备 */
-        /* 同时自动修正 Channel 配置 */
-        char cmd[2048];
-        snprintf(cmd, sizeof(cmd),
-            "python3 -c \""
-            "import serial, time, os, subprocess\\n"
-            "# 找到 Touch 设备 (VID=2988)\\n"
-            "touch_dev = None\\n"
-            "for i in range(10):\\n"
-            "    dev = f'/dev/ttyACM{i}'\\n"
-            "    if not os.path.exists(dev) or os.path.islink(dev): continue\\n"
-            "    r = subprocess.run(['udevadm','info','--name='+dev], capture_output=True, text=True)\\n"
-            "    if '2988' in r.stdout:\\n"
-            "        touch_dev = dev; break\\n"
-            "if not touch_dev: print('FAIL:no_device'); exit(1)\\n"
-            "ch = int(touch_dev.split('ttyACM')[1])\\n"
-            "print(f'FOUND:{touch_dev} CH:{ch}')\\n"
-            "# 更新 Channel\\n"
-            "cfg = os.path.expanduser('~/.3dsystems/config/Default Device.config')\\n"
-            "lines = open(cfg).readlines()\\n"
-            "with open(cfg,'w') as f:\\n"
-            "    for l in lines:\\n"
-            "        if l.startswith('Channel='): f.write(f'Channel={ch}\\\\n')\\n"
-            "        else: f.write(l)\\n"
-            "# Serial break 重置\\n"
-            "s = serial.Serial(touch_dev, 115200, timeout=0.5)\\n"
-            "s.sendBreak(duration=0.25)\\n"
-            "time.sleep(1)\\n"
-            "s.close()\\n"
-            "print('RESET_OK')\\n"
-            "\"");
-        LOG("Running recovery: %s", cmd);
-        int rc = system(cmd);
-        LOG("Recovery exit code: %d", rc);
+        /* 调用独立的重置脚本 */
+        int rc = system("bash /home/rhz/teleop/TouchUsage/scripts/reset_device.sh");
+        LOG("reset_device.sh exit: %d", rc);
 
         if(rc == 0) {
-            fprintf(stderr,"   恢复完成，重新初始化...\n");
-            LOG("Retrying hdInitDevice...");
-            /* 需要重新加载库（dlclose+dlopen），但可能不安全。先直接重试 init */
-            while((e=hd_err()).errorCode!=0) {}  /* 清错 */
+            fprintf(stderr,"   重置完成，重新初始化...\n");
+            while((e=hd_err()).errorCode!=0) {}
             g_hHD = hd_init(NULL);
             e = hd_err();
             LOG("  retry handle=%u (0x%x), error=0x%x/%d", g_hHD, g_hHD, e.errorCode, e.internalCode);
         }
 
         if(g_hHD == HD_INVALID_HANDLE) {
-            fprintf(stderr,"\n❌ 恢复失败! 请手动拔插 USB 后重新运行。\n");
-            fprintf(stderr,"   日志: cat /tmp/force_8modes.log\n");
-            LOG("RECOVERY FAILED - exiting");
+            fprintf(stderr,"\n❌ 恢复失败! 请拔插 USB 后重试。\n");
+            LOG("RECOVERY FAILED");
             if(g_log) fclose(g_log);
             return 1;
         }
