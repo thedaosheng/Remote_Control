@@ -98,8 +98,8 @@ static void f2(const double p[3],const double v[3],double f[3]){
 static void f3(const double p[3],const double v[3],double f[3]){
     double e=0.008; f[0]=-e*v[0]; f[1]=-e*v[1]; f[2]=-e*v[2];}
 static void f4(const double p[3],const double v[3],double f[3]){
-    f[0]=f[1]=f[2]=0; double wall=BOX_Y-BOX_HALF; if(p[1]<wall){double fn=0.6*(wall-p[1]);f[1]=fn;
-    double vt=sqrt(v[0]*v[0]+v[2]*v[2]);if(vt>1.0){double fr=0.5*fn;f[0]-=fr*v[0]/vt;f[2]-=fr*v[2]/vt;}}}
+    f[0]=f[1]=f[2]=0; double wz=-200.0; if(p[2]<wz){double fn=0.6*(wz-p[2]);f[2]=fn;
+    double vt=sqrt(v[0]*v[0]+v[1]*v[1]);if(vt>1.0){double fr=0.5*fn;f[0]-=fr*v[0]/vt;f[1]-=fr*v[1]/vt;}}}
 static void f5(const double p[3],const double v[3],double f[3]){
     f[0]=f[1]=f[2]=0; double rx=CX-p[0],ry=CY-p[1],rz=CZ-p[2];double d=sqrt(rx*rx+ry*ry+rz*rz);
     if(d<3)d=3;if(d>100)return;double dc=1.0-(d/100)*(d/100);if(dc<0)dc=0;
@@ -108,7 +108,7 @@ static void f6(const double p[3],const double v[3],double f[3]){
     f[0]=f[1]=f[2]=0; double rx=CX-p[0],ry=CY-p[1],rz=CZ-p[2];double d=sqrt(rx*rx+ry*ry+rz*rz);
     if(d<5)d=5;if(d>120)return;double fm=1500.0/(d*d);f[0]=fm*rx/d;f[1]=fm*ry/d;f[2]=fm*rz/d;}
 static void f7(const double p[3],const double v[3],double f[3]){
-    f[0]=f[1]=f[2]=0; double wall=BOX_Y-BOX_HALF; if(p[1]<wall){f[1]=0.4*(wall-p[1])+0.5*sin(2.0*M_PI*p[0]/10.0);}}
+    f[0]=f[1]=f[2]=0; double wz=-200.0; if(p[2]<wz){f[2]=0.4*(wz-p[2])+0.5*sin(2.0*M_PI*p[0]/10.0);}}
 static void f8(const double p[3],const double v[3],double f[3]){
     f[0]=f[1]=f[2]=0; double k=0.15,hw=15.0;
     double dy=p[1]-CY; if(dy>hw)f[1]=-k*(dy-hw);if(dy<-hw)f[1]=-k*(dy+hw);

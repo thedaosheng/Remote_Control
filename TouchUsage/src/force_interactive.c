@@ -176,16 +176,19 @@ static void calc_force(int mode, const double p[3], const double v[3], double f[
           f[0]=-e*v[0]; f[1]=-e*v[1]; f[2]=-e*v[2]; }
         break;
 
-    case 4: /* 表面摩擦: 在 Y=-50 处碰面后水平滑动有摩擦 */
-        { double wall = BOX_Y - BOX_HALF;  /* 立方体底面位置 */
-          if(p[1] < wall) {
-            double fn = 0.6*(wall - p[1]);
-            f[1] = fn;
-            double vt = sqrt(v[0]*v[0] + v[2]*v[2]);
+    case 4: /* 表面摩擦: Z=-200 处有一堵墙, Z<-200 是实体, Z>-200 自由 */
+        /* 往前推(Z变小)碰到墙, 碰上后在 XY 平面滑动有摩擦 */
+        { double wall_z = -200.0;
+          if(p[2] < wall_z) {
+            double pen = wall_z - p[2];  /* 侵入深度 */
+            double fn = 0.6 * pen;       /* 法向力 (推回 +Z 方向) */
+            f[2] = fn;
+            /* XY 平面切向摩擦 */
+            double vt = sqrt(v[0]*v[0] + v[1]*v[1]);
             if(vt > 1.0) {
                 double fr = 0.5 * fn;
                 f[0] -= fr*v[0]/vt;
-                f[2] -= fr*v[2]/vt;
+                f[1] -= fr*v[1]/vt;
             }
           }
         }
@@ -208,12 +211,13 @@ static void calc_force(int mode, const double p[3], const double v[3], double f[
           f[0]=fm*rx/d; f[1]=fm*ry/d; f[2]=fm*rz/d; }
         break;
 
-    case 7: /* 振动纹理: 立方体顶面 + 左右滑动搓衣板感 */
-        { double wall = BOX_Y - BOX_HALF;
-          if(p[1] < wall) {
-            double base = 0.4*(wall - p[1]);
-            double tex = 0.5*sin(2.0*M_PI*p[0]/10.0);
-            f[1] = base + tex;
+    case 7: /* 振动纹理: Z=-200 墙面, 碰上后左右滑动有搓衣板凹凸 */
+        { double wall_z = -200.0;
+          if(p[2] < wall_z) {
+            double pen = wall_z - p[2];
+            double base = 0.4 * pen;     /* 基础法向力 */
+            double tex = 0.5 * sin(2.0*M_PI*p[0]/10.0); /* X 方向周期性凹凸 */
+            f[2] = base + tex;  /* 推回 +Z */
           }
         }
         break;
@@ -231,8 +235,8 @@ static void calc_force(int mode, const double p[3], const double v[3], double f[
 }
 
 static const char* MODE_NAMES[] = {
-    "OFF   关闭","CUBE  立方体(50mm,探入感受6面)","SPRING 弹簧回中","VISC  粘滞蜂蜜",
-    "FRIC  摩擦面","MAG   磁吸","GRAV  重力井","TEX   纹理搓衣板","CHAN  引导槽"
+    "OFF   关闭","CUBE  立方体(探入感受6面)","SPRING 弹簧回中","VISC  粘滞蜂蜜",
+    "FRIC  Z墙摩擦(往前推碰墙)","MAG   磁吸","GRAV  重力井","TEX   Z墙搓衣板(碰墙后左右搓)","CHAN  引导槽"
 };
 
 /* ===== Servo 回调 (与 touch_demo 结构一致) ===== */
