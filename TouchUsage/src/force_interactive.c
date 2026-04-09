@@ -97,45 +97,88 @@ static void clamp(double f[3]) {
 
 /* ===== 8 种力渲染 ===== */
 
+/*
+ * 真实工作空间 (手持笔自然移动时的实测范围):
+ *   X: -77 ~ +38 mm   中心 ≈ 0
+ *   Y: -213 ~ -8 mm   中心 ≈ -100   (全程负值! Y 越大=越高)
+ *   Z: -249 ~ -77 mm  中心 ≈ -170   (全程负值! Z 越大=越靠近用户)
+ *
+ * 工作空间中心: (0, -100, -170)
+ */
+#define CX 0.0
+#define CY (-100.0)
+#define CZ (-170.0)
+
+/* 刚度墙高度: 手持中位偏下一点，从上往下压能碰到 */
+#define WALL_Y (-130.0)
+
 static void calc_force(int mode, const double p[3], const double v[3], double f[3]) {
     f[0]=f[1]=f[2]=0;
     switch(mode) {
     case 0: break; /* OFF */
-    case 1: /* 刚度墙 Y=80mm */
-        if(p[1]<80.0) f[1]=0.5*(80.0-p[1]);
+
+    case 1: /* 刚度墙: 从上往下压碰到硬面, 越压越硬, 往上抬就自由 */
+        if(p[1] < WALL_Y) f[1] = 0.4 * (WALL_Y - p[1]);
         break;
-    case 2: /* 弹簧回中 */
-        { double k=0.012,b=0.001;
-          f[0]=-k*p[0]-b*v[0]; f[1]=-k*p[1]-b*v[1]; f[2]=-k*p[2]-b*v[2]; }
+
+    case 2: /* 弹簧回中: 拉向工作空间中心 */
+        { double k=0.010, b=0.001;
+          f[0] = -k*(p[0]-CX) - b*v[0];
+          f[1] = -k*(p[1]-CY) - b*v[1];
+          f[2] = -k*(p[2]-CZ) - b*v[2]; }
         break;
-    case 3: /* 粘滞 */
-        { double e=0.008; f[0]=-e*v[0]; f[1]=-e*v[1]; f[2]=-e*v[2]; }
+
+    case 3: /* 粘滞力场: 速度越快阻力越大 */
+        { double e=0.008;
+          f[0]=-e*v[0]; f[1]=-e*v[1]; f[2]=-e*v[2]; }
         break;
-    case 4: /* 摩擦 */
-        if(p[1]<80.0) {
-            double fn=0.8*(80.0-p[1]); f[1]=fn;
-            double vt=sqrt(v[0]*v[0]+v[2]*v[2]);
-            if(vt>1.0){double fr=0.6*fn; f[0]-=fr*v[0]/vt; f[2]-=fr*v[2]/vt;}
+
+    case 4: /* 表面摩擦: 在 WALL_Y 处碰面后水平滑动有摩擦 */
+        if(p[1] < WALL_Y) {
+            double fn = 0.6*(WALL_Y - p[1]);
+            f[1] = fn;  /* 法向力向上 */
+            double vt = sqrt(v[0]*v[0] + v[2]*v[2]);
+            if(vt > 1.0) {
+                double fr = 0.5 * fn;
+                f[0] -= fr*v[0]/vt;
+                f[2] -= fr*v[2]/vt;
+            }
         }
         break;
-    case 5: /* 磁吸 */
-        { double rx=-p[0],ry=-p[1],rz=-p[2],d=sqrt(rx*rx+ry*ry+rz*rz);
-          if(d<2)d=2; if(d>120) break;
-          double dc=1.0-(d/120)*(d/120); if(dc<0)dc=0;
-          double fm=3000.0/(d*d)*dc; f[0]=fm*rx/d; f[1]=fm*ry/d; f[2]=fm*rz/d; }
+
+    case 5: /* 磁吸: 靠近工作空间中心被吸住 */
+        { double rx=CX-p[0], ry=CY-p[1], rz=CZ-p[2];
+          double d=sqrt(rx*rx+ry*ry+rz*rz);
+          if(d<3) d=3; if(d>100) break;
+          double dc=1.0-(d/100)*(d/100); if(dc<0) dc=0;
+          double fm=2000.0/(d*d)*dc;
+          f[0]=fm*rx/d; f[1]=fm*ry/d; f[2]=fm*rz/d; }
         break;
-    case 6: /* 重力井 */
-        { double rx=-p[0],ry=-p[1],rz=-p[2],d=sqrt(rx*rx+ry*ry+rz*rz);
-          if(d<3)d=3; if(d>150) break;
-          double fm=2000.0/(d*d); f[0]=fm*rx/d; f[1]=fm*ry/d; f[2]=fm*rz/d; }
+
+    case 6: /* 重力井: 温和引力拉向中心 */
+        { double rx=CX-p[0], ry=CY-p[1], rz=CZ-p[2];
+          double d=sqrt(rx*rx+ry*ry+rz*rz);
+          if(d<5) d=5; if(d>120) break;
+          double fm=1500.0/(d*d);
+          f[0]=fm*rx/d; f[1]=fm*ry/d; f[2]=fm*rz/d; }
         break;
-    case 7: /* 振动纹理 */
-        if(p[1]<80.0) f[1]=0.5*(80.0-p[1])+0.4*sin(2.0*M_PI*p[0]/8.0);
+
+    case 7: /* 振动纹理: 下压碰面后左右滑动有搓衣板感 */
+        if(p[1] < WALL_Y) {
+            double base = 0.4*(WALL_Y - p[1]);
+            double tex = 0.5*sin(2.0*M_PI*p[0]/10.0);
+            f[1] = base + tex;
+        }
         break;
-    case 8: /* 引导槽 */
-        { double k=0.3,hw=5.0,dy=p[1],dz=p[2];
-          if(dy>hw) f[1]=-k*(dy-hw); if(dy<-hw) f[1]=-k*(dy+hw);
-          if(dz>hw) f[2]=-k*(dz-hw); if(dz<-hw) f[2]=-k*(dz+hw); }
+
+    case 8: /* 引导槽: 只能沿 X 轴(左右)自由移动, Y/Z 偏离中心有恢复力 */
+        { double k=0.15, hw=15.0;
+          double dy = p[1] - CY;
+          if(dy >  hw) f[1] = -k*(dy - hw);
+          if(dy < -hw) f[1] = -k*(dy + hw);
+          double dz = p[2] - CZ;
+          if(dz >  hw) f[2] = -k*(dz - hw);
+          if(dz < -hw) f[2] = -k*(dz + hw); }
         break;
     }
 }

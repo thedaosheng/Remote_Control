@@ -64,26 +64,37 @@ static FILE* g_log=NULL;
 static double vlen(const double v[3]){return sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);}
 static void clamp(double f[3]){double m=vlen(f);if(m>MAX_FORCE){double s=MAX_FORCE/m;f[0]*=s;f[1]*=s;f[2]*=s;}}
 
-/* === 8 种力渲染 === */
+/* 真实工作空间中心 (实测) */
+#define CX 0.0
+#define CY (-100.0)
+#define CZ (-170.0)
+#define WALL_Y (-130.0)
+
+/* === 8 种力渲染 (参数与 force_interactive.c 同步) === */
 static void f0(const double p[3],const double v[3],double f[3]){f[0]=f[1]=f[2]=0;}
-static void f1(const double p[3],const double v[3],double f[3]){f[0]=f[1]=f[2]=0;if(p[1]<80.0)f[1]=0.5*(80.0-p[1]);}
-static void f2(const double p[3],const double v[3],double f[3]){double k=0.012,b=0.001;f[0]=-k*p[0]-b*v[0];f[1]=-k*(p[1]-0.0)-b*v[1];f[2]=-k*p[2]-b*v[2];}
-static void f3(const double p[3],const double v[3],double f[3]){double e=0.008;f[0]=-e*v[0];f[1]=-e*v[1];f[2]=-e*v[2];}
+static void f1(const double p[3],const double v[3],double f[3]){
+    f[0]=f[1]=f[2]=0; if(p[1]<WALL_Y) f[1]=0.4*(WALL_Y-p[1]);}
+static void f2(const double p[3],const double v[3],double f[3]){
+    double k=0.010,b=0.001;
+    f[0]=-k*(p[0]-CX)-b*v[0]; f[1]=-k*(p[1]-CY)-b*v[1]; f[2]=-k*(p[2]-CZ)-b*v[2];}
+static void f3(const double p[3],const double v[3],double f[3]){
+    double e=0.008; f[0]=-e*v[0]; f[1]=-e*v[1]; f[2]=-e*v[2];}
 static void f4(const double p[3],const double v[3],double f[3]){
-    f[0]=f[1]=f[2]=0;if(p[1]<80.0){double fn=0.8*(80.0-p[1]);f[1]=fn;
-    double vt=sqrt(v[0]*v[0]+v[2]*v[2]);if(vt>1.0){double fr=0.6*fn;f[0]-=fr*v[0]/vt;f[2]-=fr*v[2]/vt;}}}
+    f[0]=f[1]=f[2]=0; if(p[1]<WALL_Y){double fn=0.6*(WALL_Y-p[1]);f[1]=fn;
+    double vt=sqrt(v[0]*v[0]+v[2]*v[2]);if(vt>1.0){double fr=0.5*fn;f[0]-=fr*v[0]/vt;f[2]-=fr*v[2]/vt;}}}
 static void f5(const double p[3],const double v[3],double f[3]){
-    f[0]=f[1]=f[2]=0;double rx=-p[0],ry=0.0-p[1],rz=-p[2];double d=sqrt(rx*rx+ry*ry+rz*rz);
-    if(d<2)d=2;if(d>120)return;double dc=1.0-(d/120)*(d/120);if(dc<0)dc=0;double fm=3000.0/(d*d)*dc;f[0]=fm*rx/d;f[1]=fm*ry/d;f[2]=fm*rz/d;}
+    f[0]=f[1]=f[2]=0; double rx=CX-p[0],ry=CY-p[1],rz=CZ-p[2];double d=sqrt(rx*rx+ry*ry+rz*rz);
+    if(d<3)d=3;if(d>100)return;double dc=1.0-(d/100)*(d/100);if(dc<0)dc=0;
+    double fm=2000.0/(d*d)*dc;f[0]=fm*rx/d;f[1]=fm*ry/d;f[2]=fm*rz/d;}
 static void f6(const double p[3],const double v[3],double f[3]){
-    f[0]=f[1]=f[2]=0;double rx=-p[0],ry=0.0-p[1],rz=-p[2];double d=sqrt(rx*rx+ry*ry+rz*rz);
-    if(d<3)d=3;if(d>150)return;double fm=2000.0/(d*d);f[0]=fm*rx/d;f[1]=fm*ry/d;f[2]=fm*rz/d;}
+    f[0]=f[1]=f[2]=0; double rx=CX-p[0],ry=CY-p[1],rz=CZ-p[2];double d=sqrt(rx*rx+ry*ry+rz*rz);
+    if(d<5)d=5;if(d>120)return;double fm=1500.0/(d*d);f[0]=fm*rx/d;f[1]=fm*ry/d;f[2]=fm*rz/d;}
 static void f7(const double p[3],const double v[3],double f[3]){
-    f[0]=f[1]=f[2]=0;if(p[1]<80.0){f[1]=0.5*(80.0-p[1])+0.4*sin(2.0*M_PI*p[0]/8.0);}}
+    f[0]=f[1]=f[2]=0; if(p[1]<WALL_Y){f[1]=0.4*(WALL_Y-p[1])+0.5*sin(2.0*M_PI*p[0]/10.0);}}
 static void f8(const double p[3],const double v[3],double f[3]){
-    f[0]=f[1]=f[2]=0;double k=0.3,hw=5.0;double dy=p[1]-0.0;
-    if(dy>hw)f[1]=-k*(dy-hw);if(dy<-hw)f[1]=-k*(dy+hw);
-    double dz=p[2];if(dz>hw)f[2]=-k*(dz-hw);if(dz<-hw)f[2]=-k*(dz+hw);}
+    f[0]=f[1]=f[2]=0; double k=0.15,hw=15.0;
+    double dy=p[1]-CY; if(dy>hw)f[1]=-k*(dy-hw);if(dy<-hw)f[1]=-k*(dy+hw);
+    double dz=p[2]-CZ; if(dz>hw)f[2]=-k*(dz-hw);if(dz<-hw)f[2]=-k*(dz+hw);}
 
 typedef void(*ffn)(const double*,const double*,double*);
 static const ffn FNS[]={f0,f1,f2,f3,f4,f5,f6,f7,f8};
