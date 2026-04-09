@@ -51,9 +51,13 @@ python3 -c "
 import shutil
 shutil.copy2('/usr/lib/libPhantomIOLib42.so', '/tmp/patched_lib/libPhantomIOLib42.so')
 with open('/tmp/patched_lib/libPhantomIOLib42.so', 'r+b') as f:
-    f.seek(0x3f2c2); f.write(bytes([0x45,0x31,0xe4,0x90,0x90,0x90,0x90]))  # Patch1
-    f.seek(0x32446); f.write(bytes([0x90,0x90,0x90,0x90,0x90,0x90]))        # Patch3
-    f.seek(0x3b166); f.write(bytes([0x90,0x90,0x90,0x90,0x90,0x90]))        # Patch4
+    f.seek(0x3f2c2); f.write(bytes([0x45,0x31,0xe4,0x90,0x90,0x90,0x90]))  # Patch1: CommunicationReadData 返回 0
+    f.seek(0x32446); f.write(bytes([0x90,0x90,0x90,0x90,0x90,0x90]))        # Patch3: 跳过序列号校验
+    f.seek(0x3b166); f.write(bytes([0x90,0x90,0x90,0x90,0x90,0x90]))        # Patch4: 绕过 RTAI 定时器
+    # Patch5: 力限制解锁 (3.3N→10N, 0.88N→8N)
+    import struct
+    f.seek(0x4cdb0); f.write(struct.pack('<d', 10.0))   # NominalMaxForce: 3.3→10.0
+    f.seek(0x4cdb8); f.write(struct.pack('<d', 8.0))    # NominalMaxContinuousForce: 0.88→8.0
 "
 
 # 验证补丁
@@ -63,7 +67,7 @@ with open('/tmp/patched_lib/libPhantomIOLib42.so', 'rb') as f:
     f.seek(0x32446); assert f.read(6).hex()=='909090909090', 'Patch3'
     f.seek(0x3b166); assert f.read(6).hex()=='909090909090', 'Patch4'
 "
-echo -e "${GREEN}OK (3 patches applied)${NC}"
+echo -e "${GREEN}OK (5 patches: init fix×3 + force unlock×2)${NC}"
 
 # === 3. 自动检测 Touch 设备并更新 Channel ===
 echo -n "[3/5] 检测设备... "

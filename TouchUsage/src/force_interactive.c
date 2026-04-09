@@ -89,7 +89,7 @@ static volatile long g_ticks = 0;
 static volatile int g_mode = 0;
 static volatile double g_out_f[3];
 
-#define MAX_FORCE 2.5
+#define MAX_FORCE 5.0  /* 逆向测试: 设备硬件可能支持 ~8N 峰值 */
 static void clamp(double f[3]) {
     double m = sqrt(f[0]*f[0]+f[1]*f[1]+f[2]*f[2]);
     if (m > MAX_FORCE) { double s=MAX_FORCE/m; f[0]*=s; f[1]*=s; f[2]*=s; }
@@ -324,8 +324,12 @@ int main(void) {
     }
     drain_errors();
 
-    /* 启用力输出 */
-    if (f_enable) f_enable(HD_FORCE_OUTPUT);
+    /* 启用力输出, 不限幅 */
+    if (f_enable) {
+        f_enable(HD_FORCE_OUTPUT);
+        /* 注意: 不调用 hdEnable(HD_MAX_FORCE_CLAMPING=0x4001) */
+        /* 这样驱动不会把力限在 NominalMaxForce 以内 */
+    }
 
     /* 注册伺服 + 启动 (与 touch_demo 一致) */
     f_schedA(servo_loop, NULL, HD_DEFAULT_SCHEDULER_PRIORITY);
