@@ -28,7 +28,12 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            # 仿真消费端: 订阅话题 → IK → MuJoCo 物理 → 发布状态
             'mujoco_sim_node = teleop_mujoco_sim.mujoco_sim_node:main',
+            # 键盘控制层: 读键盘 → 发布 /cmd_vel 等话题
+            'keyboard_teleop_node = teleop_mujoco_sim.keyboard_teleop_node:main',
+            # Touch 力反馈笔: 读笔→发 /arm/target_pose, 订阅力→力反馈
+            'touch_haptic_node = teleop_mujoco_sim.touch_haptic_node:main',
         ],
     },
 )
