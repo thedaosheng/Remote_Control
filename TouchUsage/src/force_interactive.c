@@ -247,6 +247,17 @@ int main(void) {
     S(hd_start,hdStartScheduler); S(hd_stop,hdStopScheduler);
 #undef S
 
+    /* 诊断: 打印 LD_LIBRARY_PATH 和实际加载的库路径 */
+    LOG("ENV LD_LIBRARY_PATH=%s", getenv("LD_LIBRARY_PATH") ? getenv("LD_LIBRARY_PATH") : "<null>");
+    LOG("Dumping /proc/self/maps for PhantomIO...");
+    {
+        FILE* maps = fopen("/proc/self/maps","r");
+        if(maps){ char line[512]; while(fgets(line,sizeof(line),maps)){
+            if(strstr(line,"PhantomIO") || strstr(line,"libHD") || strstr(line,"ncurses"))
+                LOG("  MAP: %s", line);
+        } fclose(maps);}
+    }
+
     /* 清空残留错误 */
     LOG("Draining errors...");
     HDErrorInfo e;
