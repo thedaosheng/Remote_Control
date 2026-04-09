@@ -419,7 +419,7 @@ class TouchTeleop:
 
         # ★ 右臂 base body（用于动态 workspace_center）
         self.arm_base_id = mujoco.mj_name2id(
-            model, mujoco.mjtObj.mjOBJ_BODY, "right_base_link"
+            model, mujoco.mjtObj.mjOBJ_BODY, "right_arm_base"
         )
 
         # 总 DOF 数（Jacobian 矩阵列数）
