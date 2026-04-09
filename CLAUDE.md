@@ -1,5 +1,78 @@
 # Teleop 项目工作日志
 
+## 2026-04-09 会话记录 — Touch 力反馈笔力渲染能力探索
+
+---
+
+### Touch 设备关键信息（Agent 必读）
+
+**设备**: 3D Systems Touch (Phantom Omni USB), VID:PID=2988:0302
+**串口**: `/dev/ttyACM2` (Channel=2 in config, **每次拔插可能变！**)
+**配置**: `~/.3dsystems/config/Default Device.config` → `Channel=2`
+**补丁库**: `/tmp/patched_lib/libPhantomIOLib42.so` (重启后丢失，需重建)
+**假库**: `/tmp/fakelibs/libncurses.so.5` (重启后丢失，需重建)
+
+### 编译运行 Touch 程序的标准流程
+
+```bash
+# 1. 重建补丁库（重启后必做）
+mkdir -p /tmp/patched_lib /tmp/fakelibs
+gcc -shared -fPIC -o /tmp/fakelibs/libncurses.so.5 -x c /dev/null 2>/dev/null || true
+python3 -c "
+import shutil
+shutil.copy2('/usr/lib/libPhantomIOLib42.so', '/tmp/patched_lib/libPhantomIOLib42.so')
+with open('/tmp/patched_lib/libPhantomIOLib42.so', 'r+b') as f:
+    f.seek(0x3f2c2); f.write(bytes([0x45,0x31,0xe4,0x90,0x90,0x90,0x90]))
+    f.seek(0x32446); f.write(bytes([0x90,0x90,0x90,0x90,0x90,0x90]))
+    f.seek(0x3b166); f.write(bytes([0x90,0x90,0x90,0x90,0x90,0x90]))
+print('补丁重建完成')
+"
+
+# 2. 确认设备 Channel（找到 VID=2988 的 ttyACM 号）
+for d in /dev/ttyACM*; do
+  [ -L "$d" ] && continue
+  vid=$(udevadm info --name="$d" 2>/dev/null | grep ID_VENDOR_ID | sed 's/.*=//')
+  [ "$vid" = "2988" ] && echo "Touch 在 $d" && break
+done
+# 然后修改 ~/.3dsystems/config/'Default Device.config' 的 Channel=N
+
+# 3. 编译（示例）
+gcc -o /tmp/my_touch_app my_touch_app.c -ldl -lm
+
+# 4. 运行
+LD_LIBRARY_PATH=/tmp/patched_lib:/tmp/fakelibs:/usr/lib /tmp/my_touch_app
+```
+
+### 已知坑（踩过的）
+
+1. **`timeout` 杀进程会锁死设备** — 必须用 `kill -2 (SIGINT)` 优雅退出，否则下次 `hdInitDevice` 返回 `0xFFFFFFFF` (0x303 错误)。解法：拔插 USB。
+2. **Channel 号不固定** — 每次拔插 USB，ttyACM 号可能变。必须检查 VID=2988 在哪个 ttyACM 上。
+3. **Python ctypes 调 HD API 会 core dump** — `hdGetError` 返回结构体不是 int，ctypes 无法正确处理。必须用 C 的 dlopen/dlsym 方式。
+4. **补丁库在 /tmp** — 重启丢失，每次重启需重建。
+5. **hdStartScheduler 返回 0x103** — 正常现象（RTAI 硬件定时器不可用），伺服线程用 clock_nanosleep 软定时，照常 ~1kHz。
+
+### 已完成的文件
+
+```
+touch/
+├── 20260409-cc-README.md                    # 总览报告（10种力渲染模式+能力边界）
+├── 20260409-cc-handoff_to_next_agent.md     # Agent B 交接文档
+├── demos/
+│   ├── 20260409-cc-force_rendering_8modes.c # ★ 8种力渲染真机demo (已验证通过)
+│   │   编译: gcc -o /tmp/force_8modes demos/20260409-cc-force_rendering_8modes.c -ldl -lm
+│   │   运行: LD_LIBRARY_PATH=/tmp/patched_lib:/tmp/fakelibs:/usr/lib /tmp/force_8modes
+│   │   操作: 按 0-8 切换效果, q 退出
+│   │   日志: /tmp/force_8modes.log
+│   ├── 01-08_basic_shapes~gravity_well/     # 各效果说明 README
+│   └── 20260409-cc-touch_hd_driver.py       # Python 驱动层 (参考，不可直接用)
+├── mujoco_sim/                              # 4个 MuJoCo 仿真脚本 (44张截图已生成)
+├── survey/                                  # 4份调研文档
+├── third_party/                             # 4个项目评估
+└── screenshots/                             # 44张截图
+```
+
+---
+
 ## 2026-04-04 会话记录 — ROS2 仿真验证环境搭建
 
 ---
