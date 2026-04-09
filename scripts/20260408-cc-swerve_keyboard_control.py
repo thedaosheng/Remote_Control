@@ -73,6 +73,21 @@ MAX_VX = 1.0       # m/s
 MAX_VY = 1.0       # m/s
 MAX_OMEGA = 2.0    # rad/s
 
+# ============== 舵轮控制参数（FRC 最佳实践）==============
+# 轮模块最大驱动速度（rad/s），由 MAX_VX 和 WHEEL_RADIUS 推算
+MAX_WHEEL_SPEED = MAX_VX / WHEEL_RADIUS * 1.5  # 余量系数 1.5
+
+# 转向速率限制：每秒最多转多少弧度（避免轮子瞬变跳转）
+STEER_RATE_LIMIT = 8.0  # rad/s — 比 MuJoCo position actuator 的 kp 响应慢一些
+
+# 驱动加速度限制：每秒最多变化多少 rad/s（避免轮子打滑/物理震荡）
+DRIVE_ACCEL_LIMIT = 30.0  # rad/s^2
+
+# 底盘输入斜率限制（键盘 → 期望速度的平滑）
+CHASSIS_VX_SLEW = 3.0    # m/s^2
+CHASSIS_VY_SLEW = 3.0    # m/s^2
+CHASSIS_OMEGA_SLEW = 6.0 # rad/s^2
+
 # 升降参数（降低速度 + 平滑）
 LIFT_MIN = 0.0
 LIFT_MAX = 0.8
@@ -140,7 +155,7 @@ GRIPPER_CLOSE = 0.0     # 全闭位置
 # 底盘速度（直接赋值，无渐变延迟）
 CHASSIS_SPEED = 0.6     # m/s
 CHASSIS_OMEGA = 1.5     # rad/s
-DECEL_RATE = 10.0       # 松开后衰减率
+# DECEL_RATE 已废弃 — 改用 CHASSIS_*_SLEW 斜率限幅（见上方参数区）
 
 
 # ============== 全局按键状态 ==============
@@ -228,42 +243,66 @@ target_head_pitch = 0.0
 target_head_stem = 0.0
 
 
+def _slew_rate_limit(current, target, slew, dt):
+    """
+    通用斜率限幅：current 以最大 slew*dt 的步长趋近 target。
+    平滑过渡，避免瞬变跳跃。
+    """
+    max_step = slew * dt
+    delta = target - current
+    if abs(delta) > max_step:
+        delta = math.copysign(max_step, delta)
+    return current + delta
+
+
 def update_target_velocity(dt):
-    """按键状态 → 目标速度/位置"""
+    """
+    按键状态 → 目标底盘速度 (带斜率限幅)
+
+    改进: 不再用乘法衰减（旧版 target *= 1 - DECEL_RATE*dt），
+    而是用斜率限幅使速度平滑加速/减速。
+    这样松开按键后减速曲线是线性的（恒减速），不会出现
+    速度先快后慢的指数衰减"拖泥带水"感。
+    """
     global target_vx, target_vy, target_omega, target_lift, smoothed_lift
     global target_head_yaw, target_head_pitch, target_head_stem
 
-    # ---- 底盘 ----
+    # ---- 底盘: 按键 → 目标值 → 斜率限幅 ----
     w, s = is_key_held('w'), is_key_held('s')
     a, d = is_key_held('a'), is_key_held('d')
     q, e = is_key_held('q'), is_key_held('e')
 
+    # 计算按键期望值（按下=全速，松开=归零）
+    desired_vx = 0.0
     if w and not s:
-        target_vx = CHASSIS_SPEED
+        desired_vx = CHASSIS_SPEED
     elif s and not w:
-        target_vx = -CHASSIS_SPEED
-    else:
-        target_vx *= max(0.0, 1.0 - DECEL_RATE * dt)
-        if abs(target_vx) < 0.01:
-            target_vx = 0.0
+        desired_vx = -CHASSIS_SPEED
 
+    desired_vy = 0.0
     if a and not d:
-        target_vy = CHASSIS_SPEED
+        desired_vy = CHASSIS_SPEED
     elif d and not a:
-        target_vy = -CHASSIS_SPEED
-    else:
-        target_vy *= max(0.0, 1.0 - DECEL_RATE * dt)
-        if abs(target_vy) < 0.01:
-            target_vy = 0.0
+        desired_vy = -CHASSIS_SPEED
 
+    desired_omega = 0.0
     if q and not e:
-        target_omega = CHASSIS_OMEGA
+        desired_omega = CHASSIS_OMEGA
     elif e and not q:
-        target_omega = -CHASSIS_OMEGA
-    else:
-        target_omega *= max(0.0, 1.0 - DECEL_RATE * dt)
-        if abs(target_omega) < 0.01:
-            target_omega = 0.0
+        desired_omega = -CHASSIS_OMEGA
+
+    # 斜率限幅: 加速/减速都受限，曲线平滑
+    target_vx = _slew_rate_limit(target_vx, desired_vx, CHASSIS_VX_SLEW, dt)
+    target_vy = _slew_rate_limit(target_vy, desired_vy, CHASSIS_VY_SLEW, dt)
+    target_omega = _slew_rate_limit(target_omega, desired_omega, CHASSIS_OMEGA_SLEW, dt)
+
+    # 死区: 低于阈值直接归零（避免无限趋近零）
+    if abs(target_vx) < 0.005:
+        target_vx = 0.0
+    if abs(target_vy) < 0.005:
+        target_vy = 0.0
+    if abs(target_omega) < 0.005:
+        target_omega = 0.0
 
     # ---- 升降（低通滤波平滑目标值）----
     gg, hh = is_key_held('g'), is_key_held('h')
@@ -298,35 +337,168 @@ def update_target_velocity(dt):
         target_head_stem = max(target_head_stem - stem_step, HEAD_STEM_MIN)
 
 
-# ============== 舵轮逆运动学 ==============
-def swerve_ik(vx, vy, omega):
-    """底盘速度 → 4 组 (转向角, 驱动转速)"""
+# ============== 舵轮逆运动学（WPILib / Team 254 算法）==============
+# 参考: WPILib SwerveDriveKinematics + SwerveModuleState.optimize()
+# 解决了原版的 5 个核心问题:
+#   1. 零速时保持上次轮角（不归零）
+#   2. 轮速去饱和（等比缩放保持轨迹一致）
+#   3. 余弦补偿（转向未到位时减小驱动力）
+#   4. >90° 角度优化 + 驱动反转
+#   5. 转向速率限幅 + 驱动加速度限幅
+
+# 构建 (8, 3) 逆运动学矩阵 — 一次矩阵乘法替代 for 循环
+#   每个轮子 i 在位置 (mx, my):
+#     row 2i  :  [1, 0, -my]   → vx 分量
+#     row 2i+1:  [0, 1, +mx]   → vy 分量
+_IK_MATRIX = np.zeros((8, 3))
+for _i, (_mx, _my) in enumerate(WHEEL_POSITIONS):
+    _IK_MATRIX[2 * _i,     :] = [1.0, 0.0, -_my]
+    _IK_MATRIX[2 * _i + 1, :] = [0.0, 1.0,  _mx]
+
+# 计算最大可能模块距离（用于预归一化，可选）
+_MAX_MODULE_DIST = max(math.hypot(mx, my) for mx, my in WHEEL_POSITIONS)
+
+
+def _normalize_angle(angle):
+    """将角度归一化到 [-pi, pi]"""
+    angle = angle % (2.0 * math.pi)
+    if angle > math.pi:
+        angle -= 2.0 * math.pi
+    return angle
+
+
+def swerve_ik(vx, vy, omega, prev_steer_angles):
+    """
+    底盘速度 → 4 组 (转向角, 驱动转速)
+
+    核心改进（来自 WPILib / FRC 最佳实践）:
+      - 矩阵逆运动学: 一次矩阵乘法，精确且高效
+      - 零速保持: speed < eps 时保留 prev_steer_angles（不归零！）
+      - 全零输入检测: 所有输入都为零时直接返回上次角度 + 零速
+
+    参数:
+      vx, vy:   底盘期望线速度 (m/s), 前方为 +x, 左方为 +y
+      omega:    底盘期望角速度 (rad/s), 逆时针为正
+      prev_steer_angles: 上一帧的 4 个转向角 (rad)
+
+    返回:
+      steer_angles: ndarray(4,), 各轮目标转向角 (rad)
+      drive_speeds:  ndarray(4,), 各轮目标驱动转速 (rad/s)
+    """
     steer_angles = np.zeros(4)
     drive_speeds = np.zeros(4)
-    for i, (rx, ry) in enumerate(WHEEL_POSITIONS):
-        wvx = vx - omega * ry
-        wvy = vy + omega * rx
+
+    # ---- 全零输入: 保持上次角度，速度归零 ----
+    if abs(vx) < 1e-6 and abs(vy) < 1e-6 and abs(omega) < 1e-6:
+        return prev_steer_angles.copy(), drive_speeds
+
+    # ---- 矩阵逆运动学: [8×3] @ [3] → [8] ----
+    chassis_vec = np.array([vx, vy, omega])
+    module_vecs = _IK_MATRIX @ chassis_vec  # shape (8,)
+
+    for i in range(4):
+        wvx = module_vecs[2 * i]
+        wvy = module_vecs[2 * i + 1]
         speed = math.hypot(wvx, wvy)
-        if speed < 1e-4:
-            steer_angles[i] = 0.0
+
+        if speed < 1e-6:
+            # 该轮分解速度极小 → 保持上次角度（不用 atan2，避免随机方向）
+            steer_angles[i] = prev_steer_angles[i]
             drive_speeds[i] = 0.0
         else:
             steer_angles[i] = math.atan2(wvy, wvx)
             drive_speeds[i] = speed / WHEEL_RADIUS
+
     return steer_angles, drive_speeds
 
 
-def shortest_steer(target, current):
-    """选择最短转向路径，必要时反转驱动方向"""
-    diff = target - current
-    while diff > math.pi:
-        diff -= 2 * math.pi
-    while diff < -math.pi:
-        diff += 2 * math.pi
-    if abs(diff) > math.pi / 2:
-        target = target - math.pi if diff > 0 else target + math.pi
-        return target, True
-    return target, False
+def optimize_module(desired_speed, desired_angle, current_angle):
+    """
+    WPILib SwerveModuleState.optimize() 的 Python 等价实现。
+
+    核心思想: 轮子 (speed, θ) 等价于 (-speed, θ+π)。
+    因此轮子永远不需要转超过 90°。当目标角度与当前角度差 >90° 时，
+    反转驱动方向并翻转目标角度。
+
+    参数:
+      desired_speed: 目标驱动速度 (rad/s)
+      desired_angle: 目标转向角 (rad)
+      current_angle: 当前转向角 (rad)
+
+    返回:
+      (optimized_speed, optimized_angle)
+    """
+    delta = _normalize_angle(desired_angle - current_angle)
+    if abs(delta) > math.pi / 2.0:
+        # 需要转超过 90° → 反转驱动 + 角度翻 180°
+        desired_speed = -desired_speed
+        desired_angle = _normalize_angle(desired_angle + math.pi)
+    return desired_speed, desired_angle
+
+
+def desaturate_wheel_speeds(drive_speeds, max_speed):
+    """
+    WPILib desaturateWheelSpeeds() — 轮速去饱和。
+
+    当任何一个轮子的计算速度超过物理最大值时，
+    等比例缩放所有轮子的速度，保持轮速之间的比例关系不变。
+    这确保底盘沿正确轨迹运动而不变形。
+
+    参数:
+      drive_speeds: ndarray(4,), 各轮驱动速度
+      max_speed: float, 物理最大轮速
+
+    返回:
+      ndarray(4,), 去饱和后的速度
+    """
+    real_max = np.max(np.abs(drive_speeds))
+    if real_max > max_speed:
+        scale = max_speed / real_max
+        return drive_speeds * scale
+    return drive_speeds.copy()
+
+
+def cosine_scale(desired_speed, desired_angle, current_angle):
+    """
+    WPILib cosineScale() — 余弦补偿。
+
+    当轮子还没转到目标方向时，按角度误差的余弦缩小驱动速度：
+      - 轮子对准目标 → cos(0) = 1.0 → 全速
+      - 偏离 45° → cos(45°) ≈ 0.71 → 减速 29%
+      - 偏离 90° → cos(90°) = 0.0 → 完全停止
+
+    这防止了轮子在转向过程中产生侧向推力（skew），
+    是消除底盘 "吃屎感" 的关键。
+    """
+    angle_error = _normalize_angle(desired_angle - current_angle)
+    return desired_speed * math.cos(angle_error)
+
+
+def rate_limit_steer(target_angle, current_angle, max_rate, dt):
+    """
+    转向速率限幅：每步最多转 max_rate * dt 弧度。
+
+    防止 MuJoCo position actuator 因为目标角度瞬变而产生
+    巨大加速度，导致底盘 "抖动" 或 "甩尾"。
+    """
+    delta = _normalize_angle(target_angle - current_angle)
+    max_step = max_rate * dt
+    if abs(delta) > max_step:
+        delta = math.copysign(max_step, delta)
+    return _normalize_angle(current_angle + delta)
+
+
+def rate_limit_drive(target_speed, current_speed, max_accel, dt):
+    """
+    驱动加速度限幅：每步速度变化不超过 max_accel * dt。
+
+    防止轮子瞬间加减速导致打滑或物理震荡。
+    """
+    max_step = max_accel * dt
+    delta = target_speed - current_speed
+    if abs(delta) > max_step:
+        delta = math.copysign(max_step, delta)
+    return current_speed + delta
 
 
 # ============== 低通滤波器 ==============
@@ -865,7 +1037,8 @@ def main():
     listener.start()
     print(">>> pynput 键盘监听已启动")
 
-    current_steer = np.zeros(4)
+    current_steer = np.zeros(4)  # 记忆: 各轮当前转向角 (rad)
+    current_drive = np.zeros(4)  # 记忆: 各轮当前驱动速度 (rad/s)
     chassis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "chassis_link")
 
     # 查找 head_cam 用于第一人称切换
@@ -952,6 +1125,7 @@ def main():
                 target_head_yaw = target_head_pitch = 0.0
                 target_head_stem = 0.0
                 current_steer[:] = 0.0
+                current_drive[:] = 0.0
                 touch.reset()
 
                 mujoco.mj_forward(model, data)
@@ -961,22 +1135,44 @@ def main():
             # 1. 更新速度/位置目标
             update_target_velocity(model.opt.timestep)
 
-            # 2. 舵轮 IK
-            steer_angles, drive_speeds = swerve_ik(
-                target_vx, target_vy, target_omega
+            # 2. 舵轮 IK（WPILib / FRC 最佳实践 pipeline）
+            #    步骤: IK → 去饱和 → 角度优化 → 余弦补偿 → 速率限幅
+            dt = model.opt.timestep
+
+            # 2a. 逆运动学: 底盘速度 → 4 轮 (角度, 速度)
+            raw_steer, raw_drive = swerve_ik(
+                target_vx, target_vy, target_omega, current_steer
             )
+
+            # 2b. 轮速去饱和: 超速时等比缩放，保持轨迹正确
+            raw_drive = desaturate_wheel_speeds(raw_drive, MAX_WHEEL_SPEED)
+
+            # 2c. 逐轮优化 + 余弦补偿 + 速率限幅
+            cmd_steer = np.zeros(4)
+            cmd_drive = np.zeros(4)
             for i in range(4):
-                if abs(drive_speeds[i]) > 1e-4:
-                    steer_angles[i], rev = shortest_steer(
-                        steer_angles[i], current_steer[i]
-                    )
-                    if rev:
-                        drive_speeds[i] = -drive_speeds[i]
-                    current_steer[i] = steer_angles[i]
+                # optimize: >90° 时反转驱动 + 翻转角度（轮子不用转超过 90°）
+                opt_speed, opt_angle = optimize_module(
+                    raw_drive[i], raw_steer[i], current_steer[i]
+                )
+                # cosine: 轮子还没转到位时减小驱动力（防止侧向漂移）
+                opt_speed = cosine_scale(opt_speed, opt_angle, current_steer[i])
+                # 转向速率限幅: 每步最多转 STEER_RATE_LIMIT * dt 弧度
+                cmd_steer[i] = rate_limit_steer(
+                    opt_angle, current_steer[i], STEER_RATE_LIMIT, dt
+                )
+                # 驱动加速度限幅: 每步速度变化不超过 DRIVE_ACCEL_LIMIT * dt
+                cmd_drive[i] = rate_limit_drive(
+                    opt_speed, current_drive[i], DRIVE_ACCEL_LIMIT, dt
+                )
+
+            # 2d. 更新状态记忆
+            current_steer[:] = cmd_steer
+            current_drive[:] = cmd_drive
 
             # 3. 写入执行器
-            data.ctrl[0:4] = steer_angles      # 转向
-            data.ctrl[4:8] = drive_speeds       # 驱动
+            data.ctrl[0:4] = cmd_steer         # 转向（平滑后）
+            data.ctrl[4:8] = cmd_drive         # 驱动（平滑后）
             data.ctrl[8] = smoothed_lift        # ★ 使用平滑后的升降目标
             data.ctrl[9:15] = ARM_HOME_LEFT     # 左臂 home
             touch.update()                       # 右臂+夹爪 → ctrl[15:21]+ctrl[24]
