@@ -26,6 +26,7 @@ extern "C" {
 #define HAL_UART_MODULE_ENABLED     /* UART（micro-ROS transport 需要）*/
 #define HAL_TIM_MODULE_ENABLED      /* 定时器（FreeRTOS 心跳需要）*/
 #define HAL_EXTI_MODULE_ENABLED     /* 外部中断 */
+#define HAL_FDCAN_MODULE_ENABLED    /* FDCAN（达妙电机 CAN 总线）*/
 #define HAL_PCD_MODULE_ENABLED      /* USB Device (PCD) — CDC 需要 */
 #define HAL_HCD_MODULE_ENABLED      /* USB Host (备用) */
 
@@ -138,6 +139,10 @@ extern "C" {
 
 #ifdef HAL_EXTI_MODULE_ENABLED
   #include "stm32h7xx_hal_exti.h"
+#endif
+
+#ifdef HAL_FDCAN_MODULE_ENABLED
+  #include "stm32h7xx_hal_fdcan.h"
 #endif
 
 #ifdef HAL_PCD_MODULE_ENABLED
