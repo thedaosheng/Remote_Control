@@ -23,8 +23,10 @@ if [ ! -f /tmp/patched_lib/libPhantomIOLib42.so ]; then
     bash "$SCRIPT_DIR/deploy.sh"
 fi
 
-# 杀掉已有实例
-pkill -f force_background 2>/dev/null
+# 杀掉所有残留的 Touch 进程（防止设备被占用导致 0x303）
+for PNAME in force_background force_interactive touch_demo; do
+    for PID in $(pgrep -x "$PNAME" 2>/dev/null); do kill "$PID" 2>/dev/null; done
+done
 sleep 1
 
 # 自动检测 Channel + serial break

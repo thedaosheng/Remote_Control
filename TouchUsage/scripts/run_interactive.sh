@@ -5,6 +5,12 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# 杀掉所有残留的 Touch 进程（这是 0x303 错误的头号原因！）
+for PNAME in force_background force_interactive touch_demo; do
+    for PID in $(pgrep -x "$PNAME" 2>/dev/null); do kill "$PID" 2>/dev/null; done
+done
+sleep 1
+
 # 检查是否已编译
 if [ ! -f /tmp/force_interactive ]; then
     echo "未编译，先运行部署..."
