@@ -139,10 +139,52 @@ for c in data.get('connections',[]):
 1. **必须用 Rule 模式** — Global 模式会把所有流量扔到 IPRoyal，HTTP 代理不支持 UDP 且并发有限，会导致全部超时
 2. **一个 Claude 账号不要多设备同时用** — 同一 IP 上多个活跃会话可能触发账号密度风控
 3. **不要频繁切换 IP** — 保持稳定使用同一个出口
-4. **系统环境建议配套修改**（非必须但推荐）：
-   - 系统时区改为 `America/New_York`（匹配 IP 所在地）
-   - 系统语言首选项加 `English (US)`
-   - 浏览器语言偏好设为 `en-US`
+
+## 新电脑系统环境配置（必做）
+
+配完 Clash 分流后，还需要修改系统环境以匹配美国 IP，否则浏览器指纹层会暴露矛盾。
+
+### macOS 一键配置
+
+```bash
+# 1. 时区改为美东（匹配 IPRoyal 纽约出口）
+sudo systemsetup -settimezone "America/New_York"
+
+# 2. DNS 改为 Google DNS（去掉 114.114.114.114 中国 DNS）
+sudo networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1
+# 如果用有线网：
+sudo networksetup -setdnsservers "USB 10/100/1000 LAN" 8.8.8.8 1.1.1.1
+
+# 3. 验证
+date +'%z %Z'              # 应显示 -0400 EDT 或 -0500 EST
+scutil --dns | grep nameserver  # 应显示 8.8.8.8
+```
+
+### 手动操作（需要 GUI）
+
+- **系统语言**：系统设置 → 通用 → 语言与地区 → 添加 English (US) 并拖到第一位
+- **浏览器语言**：Chrome 设置 → 语言 → 将 English (US) 设为首选
+- **WebRTC 防泄漏**：Chrome 安装 [WebRTC Leak Shield](https://chromewebstore.google.com/detail/webrtc-leak-shield/bppamachkoflopbagkdoflbgfjflfnfl) 扩展
+
+### Clash Verge 强制 Rule 模式
+
+如果订阅默认是 Global 模式，在对应的 **Merge 文件** 中加一行：
+
+```yaml
+mode: rule
+```
+
+这样即使配置刷新也会保持 Rule 模式。
+
+### 验证清单
+
+| 检查项 | 命令 | 期望结果 |
+|--------|------|---------|
+| 时区 | `date +'%z %Z'` | `-0400 EDT` 或 `-0500 EST` |
+| DNS | `scutil --dns \| grep nameserver` | `8.8.8.8` |
+| 系统语言 | `defaults read -g AppleLocale` | `en_US` |
+| Claude 出口 | Clash 连接日志 | `claude.ai → 🤖 Claude → 🇺🇸 US-Residential-Claude` |
+| Clash 模式 | Clash Verge 界面 | Rule（非 Global） |
 
 ## 流量架构
 
