@@ -1,221 +1,165 @@
-# Clash 新电脑配置：Claude 专用美国住宅 IP 分流
+# 🇺🇸 如何让一台电脑变成"美国电脑" —— 链式代理部署指南
 
-> 目的：所有设备访问 Claude/Anthropic 时走独享美国住宅 IP，其他流量走 Ikuuu 节点。
+> **目标**：让任何一台电脑的所有网络流量都通过美国静态住宅 IP 出口，在外界看来就像一台真正位于美国的电脑。
+>
+> **已验证效果**：在 ipdata.co、scamalytics.com、ippure.com、ip-api.com 等 IP 评测网站上全部显示为美国纯净住宅 IP，非 VPN、非数据中心、非代理。
 
-## 背景
+## 1. 架构总览
 
-Anthropic 风控系统会检测 IP/ASN、浏览器指纹、DNS 泄露、支付信息等多层信号。使用机场节点（如 Ikuuu）访问 Claude 风险极高（ASN 一眼代理商）。解决方案是购买独享美国住宅 IP，仅让 Claude 流量走这个干净出口。
+```
+你的电脑 ──▶ Clash TUN ──▶ 🇭🇰 HK-Relay (香港IEPL) ──▶ 🇺🇸 US-Residential (SOCKS5) ──▶ 目标网站
+```
 
-## 代理信息
+### 核心原理：链式代理（Chained Proxy）
+
+流量经过两跳才到达目标网站：
+1. **第一跳 - 香港 IEPL 专线**：Clash TUN 劫持所有流量发到香港。IEPL 不经过公网 GFW，延迟低（~50ms）且稳定。
+2. **第二跳 - 美国住宅 SOCKS5**：香港节点转发到 iProyal 美国静态住宅代理。SOCKS5 做透明 TCP/UDP 转发。
+
+**安全保障**：任何一段链路断开 → 连接失败 → **绝不回落直连泄露真实 IP**。
+
+### 为什么别人看不出你是谁？
+
+| 层级 | 检查内容 | 为什么我们能过 |
+|------|---------|--------------|
+| IP 归属 | 是否数据中心/VPN？ | 我们的 IP 注册在住宅 ISP (NB NETWORKS GROUP LLC, ASN54339) |
+| 行为历史 | IP 是否被大量共享？ | 静态住宅 IP 只有你一个人用，历史干净 |
+| 连接特征 | 是否有代理特征头？ | SOCKS5 透明转发，不修改 TLS/HTTP 头，不插入 X-Forwarded-For |
+
+你的真实 IP → 只有第一跳（香港）知道。iProyal → 只看到香港 IP。目标网站 → 只看到美国住宅 IP。
+
+## 2. 代理服务商
+
+**iProyal 静态住宅代理**
+
+- 官网：https://iproyal.com （中文站 https://iproyal.cn）
+- 控制面板：https://dashboard.iproyal.com
+- 快速上手：https://iproyal.cn/quick-start-guides/static-residential-proxies/
+
+**当前代理信息：**
 
 | 项目 | 值 |
 |------|-----|
-| 供应商 | IPRoyal (独享 ISP 代理) |
-| 类型 | HTTP Proxy |
-| 服务器 | `95.134.206.39` |
-| 端口 | `12323` |
+| IP 地址 | `95.134.206.39` |
+| 地区 | 美国纽约州 Kaser |
+| ISP | NB NETWORKS GROUP LLC |
+| ASN | AS54339 |
+| SOCKS5 端口 | `12324` |
+| HTTP 端口 | `12323`（链式模式下有 TLS 兼容问题，**建议用 SOCKS5**） |
 | 用户名 | `14a5bdb857e9f` |
 | 密码 | `125b6a6f29` |
-| 出口 IP 地区 | 美国纽约 Kaser |
-| ASN | AS54339 NB NETWORKS GROUP LLC |
-| ip-api proxy 标记 | false |
-| ip-api hosting 标记 | false |
 
-## 配置方式
+## 3. 前置条件
 
-### 方式一：Clash Verge Rev（推荐，通过 Script 注入）
+- **Clash Verge Rev** 2.4.x+（内置 mihomo/Meta 内核 >= v1.19.17）
+- 机场订阅包含**香港 IEPL 专线节点**
+- mihomo >= v1.19.17（`relay` 已移除，必须用 `dialer-proxy`）
 
-适用于所有使用 Clash Verge Rev 的设备。
+## 4. Step by Step 配置
 
-**步骤：**
+### Step 1：安装 Clash Verge Rev 并导入机场订阅
 
-1. 打开 Clash Verge → **Profiles（配置）**
-2. 找到当前使用的 Ikuuu 订阅卡片
-3. 点卡片右上角 **编辑图标** → 切到 **Script** 标签页
-4. 把下面的 JS 完整粘贴进去（替换原有内容）
-5. 保存 → 点订阅的刷新按钮重载配置
-6. **重要：模式切到 Rule（规则模式），不要用 Global**
+- macOS: GitHub Releases 下载 DMG
+- Linux: `sudo dpkg -i clash-verge_x.x.x_amd64.deb`
 
+### Step 2：找到脚本增强文件
+
+Clash Verge → 订阅 → 当前订阅右侧「脚本」(Script) → 编辑
+
+文件路径：
+```bash
+# macOS
+~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/profiles/<script_uid>.js
+
+# Linux
+~/.local/share/io.github.clash-verge-rev.clash-verge-rev/profiles/<script_uid>.js
+```
+
+脚本 UID 在 `profiles.yaml` 中，看当前活跃配置绑定的 `script` 字段。
+
+### Step 3：写入链式代理脚本
+
+**核心配置，一个文件搞定所有。** 将脚本文件替换为 [`clash-chained-proxy.js`](./scripts/clash-chained-proxy.js)
+
+### Step 4：配置全局 Merge（TUN 路由排除）
+
+```yaml
+profile:
+  store-selected: true
+
+tun:
+  route-exclude-address:
+    - 169.254.0.0/16
+    - fe80::/10
+    - 224.0.0.0/4
+    - ff00::/8
+  inet4-route-exclude-address:
+    - 192.168.0.0/16
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 127.0.0.0/8
+```
+
+### Step 5：重启并切换
+
+1. 重启 Clash Verge Rev
+2. 确认模式为 **Rule**（不是 Global）
+3. 在 Proxies 页面，把 `🔰 选择节点` 和 `🐟 漏网之鱼` 都切到 `🇺🇸 US-Residential`
+4. 打开 https://ippure.com/ 确认 IP 为 `95.134.206.39`
+
+## 5. 系统环境配置（可选，进一步降低风险）
+
+```bash
+# 时区改为美东（匹配纽约出口）
+sudo systemsetup -settimezone "America/New_York"  # macOS
+sudo timedatectl set-timezone America/New_York     # Linux
+
+# DNS 改为 Google DNS
+sudo networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1  # macOS
+```
+
+## 6. 验证
+
+| 网站 | 检查项 | 期望结果 |
+|------|--------|---------|
+| https://ippure.com | IP | `95.134.206.39` |
+| https://ipdata.co | IP Type | 非 VPN / 非代理 / 非数据中心 |
+| https://scamalytics.com/ip/95.134.206.39 | Fraud Score | Low |
+| https://ip-api.com | ISP / Hosting | NB NETWORKS GROUP LLC / None |
+| https://meowvps.com/tools/ip-check/ | 综合检查 | 低风险 |
+
+终端验证：
+```bash
+curl https://api.ipify.org        # 应返回 95.134.206.39
+curl http://ip-api.com/json       # Country: United States, Hosting: false
+```
+
+## 7. 回退方法
+
+**快速回退（不改文件）**：在 Clash Verge GUI 里把策略组切回其他节点，立即生效。
+
+**彻底回退**：将脚本文件替换为：
 ```javascript
-// Define main function (script entry)
-
-function main(config, profileName) {
-  // === Claude 专用美国住宅 IP ===
-  const claudeProxy = {
-    name: "🇺🇸 US-Residential-Claude",
-    type: "http",
-    server: "95.134.206.39",
-    port: 12323,
-    username: "14a5bdb857e9f",
-    password: "125b6a6f29",
-  };
-
-  // 添加代理节点
-  if (!config.proxies) config.proxies = [];
-  config.proxies.unshift(claudeProxy);
-
-  // 添加 Claude 策略组
-  const claudeGroup = {
-    name: "🤖 Claude",
-    type: "select",
-    proxies: ["🇺🇸 US-Residential-Claude"],
-  };
-  if (!config["proxy-groups"]) config["proxy-groups"] = [];
-  config["proxy-groups"].unshift(claudeGroup);
-
-  // Claude 分流规则：域名 + 进程双重保障
-  const claudeRules = [
-    // 已知域名（精确匹配，优先级最高）
-    "DOMAIN-SUFFIX,claude.ai,🤖 Claude",
-    "DOMAIN-SUFFIX,anthropic.com,🤖 Claude",
-    "DOMAIN-SUFFIX,claude.com,🤖 Claude",
-    "DOMAIN-KEYWORD,anthropic,🤖 Claude",
-    // 进程兜底：不管访问什么域名，只要是 Claude 进程发出的都走住宅 IP
-    "PROCESS-NAME,Claude,🤖 Claude",
-    "PROCESS-NAME,claude,🤖 Claude",
-    "PROCESS-NAME,Claude Helper,🤖 Claude",
-    "PROCESS-NAME,Claude Helper (GPU),🤖 Claude",
-    "PROCESS-NAME,Claude Helper (Renderer),🤖 Claude",
-  ];
-  if (!config.rules) config.rules = [];
-  config.rules = claudeRules.concat(config.rules);
-
-  return config;
-}
+function main(config, profileName) { return config; }
 ```
+然后重启 Clash Verge。
 
-### 方式二：手动编辑配置文件（ClashX / Clash for Android / Stash 等）
+## 8. 已部署设备
 
-在配置文件的对应位置手动插入：
+| 设备 | IP | 用户名 | 脚本文件 | 状态 |
+|------|-----|--------|---------|------|
+| Linux Desktop | 192.168.0.181 | rhz | `sGxvdaDiQpwX.js` | ✅ 已验证 |
+| Mac Mini | 192.168.0.177 | edward | `skjP6XIedprF.js` | ✅ 已验证 |
+| MacBook Air M4 | 192.168.0.212 | ZHUANZ | `shZ1WdPGyWav.js` | ✅ 已验证 |
 
-**proxies 段最前面加：**
-```yaml
-- name: "🇺🇸 US-Residential-Claude"
-  type: http
-  server: 95.134.206.39
-  port: 12323
-  username: "14a5bdb857e9f"
-  password: "125b6a6f29"
-```
+## 9. 注意事项
 
-**proxy-groups 段最前面加：**
-```yaml
-- name: "🤖 Claude"
-  type: select
-  proxies:
-    - "🇺🇸 US-Residential-Claude"
-```
+- **为什么用 SOCKS5 不用 HTTP？** iProyal HTTP 代理在链式模式下有 TLS 握手兼容问题（`Proxy CONNECT aborted`），SOCKS5 透明转发无此问题。
+- **为什么用 `dialer-proxy` 不用 `relay`？** mihomo v1.19.17 已移除 `relay` 类型 proxy-group，必须用 `dialer-proxy` 字段。
+- **为什么选香港 IEPL 做中继？** IEPL 是专线，不经 GFW，延迟低且稳定。直连美国住宅 IP 容易因跨太平洋链路不稳而断连。
+- **iProyal 白名单**：建议在 dashboard.iproyal.com 中将公网 IP 加入白名单。
 
-**rules 段最前面加：**
-```yaml
-# 域名精确匹配
-- DOMAIN-SUFFIX,claude.ai,🤖 Claude
-- DOMAIN-SUFFIX,anthropic.com,🤖 Claude
-- DOMAIN-SUFFIX,claude.com,🤖 Claude
-- DOMAIN-KEYWORD,anthropic,🤖 Claude
-# 进程兜底（防止 Anthropic 新增域名漏网）
-- PROCESS-NAME,Claude,🤖 Claude
-- PROCESS-NAME,claude,🤖 Claude
-- PROCESS-NAME,Claude Helper,🤖 Claude
-- PROCESS-NAME,Claude Helper (GPU),🤖 Claude
-- PROCESS-NAME,Claude Helper (Renderer),🤖 Claude
-```
+---
 
-## 配置完成后验证
-
-### 1. 检查分流是否生效
-
-在 Clash 的连接日志中，访问 claude.ai 后应该看到：
-
-```
-claude.ai:443 → ['🇺🇸 US-Residential-Claude', '🤖 Claude']
-api.anthropic.com:443 → ['🇺🇸 US-Residential-Claude', '🤖 Claude']
-```
-
-### 2. 通过 Clash API 查看（Clash Verge）
-
-```bash
-curl -s http://127.0.0.1:9090/connections \
-  -H "Authorization: Bearer <你的secret>" | \
-  python3 -c "
-import json,sys
-data=json.load(sys.stdin)
-for c in data.get('connections',[]):
-    meta = c.get('metadata',{})
-    host = meta.get('host','')
-    if 'claude' in host.lower() or 'anthropic' in host.lower():
-        print(f'{host}:{meta.get(\"destinationPort\",\"\")} → {c.get(\"chains\",[])}')
-"
-```
-
-## 注意事项
-
-1. **必须用 Rule 模式** — Global 模式会把所有流量扔到 IPRoyal，HTTP 代理不支持 UDP 且并发有限，会导致全部超时
-2. **一个 Claude 账号不要多设备同时用** — 同一 IP 上多个活跃会话可能触发账号密度风控
-3. **不要频繁切换 IP** — 保持稳定使用同一个出口
-
-## 新电脑系统环境配置（必做）
-
-配完 Clash 分流后，还需要修改系统环境以匹配美国 IP，否则浏览器指纹层会暴露矛盾。
-
-### macOS 一键配置
-
-```bash
-# 1. 时区改为美东（匹配 IPRoyal 纽约出口）
-sudo systemsetup -settimezone "America/New_York"
-
-# 2. DNS 改为 Google DNS（去掉 114.114.114.114 中国 DNS）
-sudo networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1
-# 如果用有线网：
-sudo networksetup -setdnsservers "USB 10/100/1000 LAN" 8.8.8.8 1.1.1.1
-
-# 3. 验证
-date +'%z %Z'              # 应显示 -0400 EDT 或 -0500 EST
-scutil --dns | grep nameserver  # 应显示 8.8.8.8
-```
-
-### 手动操作（需要 GUI）
-
-- **系统语言**：系统设置 → 通用 → 语言与地区 → 添加 English (US) 并拖到第一位
-- **浏览器语言**：Chrome 设置 → 语言 → 将 English (US) 设为首选
-- **WebRTC 防泄漏**：Chrome 安装 [WebRTC Leak Shield](https://chromewebstore.google.com/detail/webrtc-leak-shield/bppamachkoflopbagkdoflbgfjflfnfl) 扩展
-
-### Clash Verge 强制 Rule 模式
-
-如果订阅默认是 Global 模式，在对应的 **Merge 文件** 中加一行：
-
-```yaml
-mode: rule
-```
-
-这样即使配置刷新也会保持 Rule 模式。
-
-### 验证清单
-
-| 检查项 | 命令 | 期望结果 |
-|--------|------|---------|
-| 时区 | `date +'%z %Z'` | `-0400 EDT` 或 `-0500 EST` |
-| DNS | `scutil --dns \| grep nameserver` | `8.8.8.8` |
-| 系统语言 | `defaults read -g AppleLocale` | `en_US` |
-| Claude 出口 | Clash 连接日志 | `claude.ai → 🤖 Claude → 🇺🇸 US-Residential-Claude` |
-| Clash 模式 | Clash Verge 界面 | Rule（非 Global） |
-
-## 流量架构
-
-```
-设备
- └── 所有流量 → Clash (TUN + Fake-IP, Rule 模式)
-                 │
-                 ├── claude.ai / anthropic.com / claude.com
-                 │     └── 🤖 Claude → 🇺🇸 US-Residential-Claude
-                 │            └── 出口: 95.134.206.39 (美国纽约, 独享住宅 IP)
-                 │
-                 └── 其他流量
-                       └── 🔰 选择节点 → Ikuuu 节点
-```
-
-## IP 续费
-
-- 供应商：[IPRoyal](https://iproyal.com/isp-proxies/)
-- 当前套餐：$17.82/月（含城市定位 + Scamalytics 0 risk 筛选）
-- 续费/管理：登录 IPRoyal Dashboard
+**文档版本**：v2.0（从 v1 升级为链式代理架构）
+**创建日期**：2026-04-11
