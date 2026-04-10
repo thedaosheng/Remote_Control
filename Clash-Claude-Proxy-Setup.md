@@ -63,12 +63,19 @@ function main(config, profileName) {
   if (!config["proxy-groups"]) config["proxy-groups"] = [];
   config["proxy-groups"].unshift(claudeGroup);
 
-  // 添加 Claude 分流规则（插入到最前面）
+  // Claude 分流规则：域名 + 进程双重保障
   const claudeRules = [
+    // 已知域名（精确匹配，优先级最高）
     "DOMAIN-SUFFIX,claude.ai,🤖 Claude",
     "DOMAIN-SUFFIX,anthropic.com,🤖 Claude",
     "DOMAIN-SUFFIX,claude.com,🤖 Claude",
     "DOMAIN-KEYWORD,anthropic,🤖 Claude",
+    // 进程兜底：不管访问什么域名，只要是 Claude 进程发出的都走住宅 IP
+    "PROCESS-NAME,Claude,🤖 Claude",
+    "PROCESS-NAME,claude,🤖 Claude",
+    "PROCESS-NAME,Claude Helper,🤖 Claude",
+    "PROCESS-NAME,Claude Helper (GPU),🤖 Claude",
+    "PROCESS-NAME,Claude Helper (Renderer),🤖 Claude",
   ];
   if (!config.rules) config.rules = [];
   config.rules = claudeRules.concat(config.rules);
@@ -101,10 +108,17 @@ function main(config, profileName) {
 
 **rules 段最前面加：**
 ```yaml
+# 域名精确匹配
 - DOMAIN-SUFFIX,claude.ai,🤖 Claude
 - DOMAIN-SUFFIX,anthropic.com,🤖 Claude
 - DOMAIN-SUFFIX,claude.com,🤖 Claude
 - DOMAIN-KEYWORD,anthropic,🤖 Claude
+# 进程兜底（防止 Anthropic 新增域名漏网）
+- PROCESS-NAME,Claude,🤖 Claude
+- PROCESS-NAME,claude,🤖 Claude
+- PROCESS-NAME,Claude Helper,🤖 Claude
+- PROCESS-NAME,Claude Helper (GPU),🤖 Claude
+- PROCESS-NAME,Claude Helper (Renderer),🤖 Claude
 ```
 
 ## 配置完成后验证
