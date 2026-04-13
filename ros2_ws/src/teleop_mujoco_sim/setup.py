@@ -29,6 +29,9 @@ setup(
     entry_points={
         'console_scripts': [
             'mujoco_sim_node = teleop_mujoco_sim.mujoco_sim_node:main',
+            'keyboard_teleop_node = teleop_mujoco_sim.keyboard_teleop_node:main',
+            'touch_haptic_node = teleop_mujoco_sim.touch_haptic_node:main',
+            'swerve_dm_driver_node = teleop_mujoco_sim.swerve_dm_driver_node:main',
         ],
     },
 )
