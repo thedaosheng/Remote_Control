@@ -206,3 +206,71 @@ motor_control_node                    ros2_control
 - PREEMPT_RT 实时内核（NUC11PH，目标 500Hz 控制环）
 - 升降关节（torso_link 下方预留 lift_joint prismatic 接口）
 - 真实 CAN 驱动（motor_control_node 中 `_send_can` 方法已预留）
+
+---
+
+## 2026-04-13 会话记录 — DM4310 舵轮底盘键盘控制
+
+PR: thedaosheng/Remote_Control#3
+
+---
+
+### 一、今天做了什么
+
+#### 1. 硬件调通：达妙 DM4310 × 4 舵轮电机
+- 排查 USB-CAN 适配器：系统有 DISCOVER Robotics ×2、gs_usb ×1、HDSC CDC ×1
+- 最终确认达妙 USB-CAN 适配器是 **HDSC CDC** 设备，端口 `/dev/ttyACM2`（重插后编号会变）
+- 诊断 CAN 线缆断裂：USB 端通信正常（写入被消费、吞吐 444KB/s），但 CAN 总线无应答 → 用户修复线缆后恢复
+- 4 个电机全部在线：FL=0x03, FR=0x06, RL=0x04, RR=0x05
+
+#### 2. 电机 0x04 ERR=0x2 故障
+- 电机 0x04 (RL) 能通信、能使能、能读参数，但 **不执行运动指令**
+- 反馈帧 ERR 字段持续为 0x2（不在标准故障码表 0/1/8/9/A/B/C/D/E 中）
+- 设零位、断电重启均无效，疑似硬件故障
+- 驱动节点已做自动跳过处理
+
+#### 3. ROS2 三节点架构
+新建 `swerve_dm_driver_node` 驱动节点，与已有节点组成完整链路：
+```
+keyboard_teleop_node → /cmd_vel (Twist)
+mujoco_sim_node      → /mujoco/swerve_cmd (Float64MultiArray[8])
+swerve_dm_driver_node → USB-CAN → DM4310 × 4
+```
+
+#### 4. 关键 debug 经验
+- `set_zero_position` **必须在使能之前调用**，否则电机进入异常状态不执行命令
+- MIT 模式纯转向控制：`dq` 必须设为 0，不能混入驱动速度，否则电机被拉偏
+- 电机位置偏移可达数百度（多圈累积），启动时必须设零或记录偏移
+
+### 二、启动命令
+
+```bash
+# 终端 1: MuJoCo 仿真 (显示舵轮运动)
+cd /home/rhz/teleop/ros2_ws && source /opt/ros/humble/setup.bash && source install/setup.bash
+DISPLAY=:0 ros2 run teleop_mujoco_sim mujoco_sim_node --ros-args -p enable_touch:=false
+
+# 终端 2: 键盘控制
+cd /home/rhz/teleop/ros2_ws && source /opt/ros/humble/setup.bash && source install/setup.bash
+DISPLAY=:0 ros2 run teleop_mujoco_sim keyboard_teleop_node
+
+# 终端 3: 电机驱动 (注意 ttyACM 编号可能变化)
+cd /home/rhz/teleop/ros2_ws && source /opt/ros/humble/setup.bash && source install/setup.bash
+ros2 run teleop_mujoco_sim swerve_dm_driver_node --ros-args -p serial_port:=/dev/ttyACM2
+```
+
+键盘: WASD=全向平移, QE=原地旋转, GH=升降, IJKL=云台, R=归零, ESC=退出
+
+### 三、文件清单
+
+| 文件 | 说明 |
+|------|------|
+| `ros2_ws/src/teleop_mujoco_sim/teleop_mujoco_sim/swerve_dm_driver_node.py` | ROS2 电机驱动节点 (核心) |
+| `ros2_ws/src/teleop_mujoco_sim/teleop_mujoco_sim/keyboard_teleop_node.py` | 键盘遥操作节点 |
+| `scripts/20260413-cc-swerve_motor_test.py` | 电机扫描/摆动测试 |
+| `scripts/20260413-cc-swerve_motor_control.py` | MuJoCo+电机独立联动 (不依赖 ROS2) |
+
+### 四、遗留问题
+1. **0x04 电机 ERR=0x2** — 硬件故障待更换/排查
+2. **USB-CAN 端口漂移** — HDSC CDC 重插后 ttyACM 编号会变，需确认
+3. **驱动电机未接入** — 当前只控制转向角，驱动轮速需要额外电机或同轴方案
+4. **MuJoCo 联动优化** — 仿真中底盘是力驱动，真实电机是位置控制，两者反馈尚未闭环

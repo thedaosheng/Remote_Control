@@ -1,0 +1,52 @@
+# ==============================================================
+#  舵轮 DM4310 电机驱动配置
+# ==============================================================
+#
+# 所有电机参数集中在此文件管理，驱动节点启动时加载。
+# 修改参数后无需重新编译，重启节点即可生效。
+
+swerve_dm_driver_node:
+  ros__parameters:
+
+    # ---- USB-CAN 适配器 ----
+    # "auto" = 自动扫描 HDSC CDC 设备，找到即用
+    # 也可手动指定，如 "/dev/ttyACM2"
+    serial_port: "auto"
+    baudrate: 921600
+
+    # ---- 电机布局 ----
+    # 4 个舵轮电机的 CAN SlaveID，顺序: FL, FR, RL, RR
+    # MasterID = SlaveID + master_id_offset
+    motor_ids: [3, 6, 4, 5]
+    master_id_offset: 16    # 0x10
+
+    # ---- MIT 阻抗控制参数 ----
+    # 转向电机: 纯位置跟踪 (dq=0)
+    steer_kp: 15.0          # 位置刚度 — 越大转向越硬
+    steer_kd: 1.5           # 速度阻尼 — 防止振荡
+
+    # ---- 安全限幅 ----
+    steer_pos_limit: 3.14   # rad — 转向角限幅 (±180°)
+
+    # ---- 超时保护 ----
+    cmd_timeout: 0.5        # 秒 — 无指令超时后保持当前位置
+
+    # ---- 控制频率 ----
+    control_hz: 200         # 电机控制循环频率 (ZLAC SDO 最高)
+    feedback_hz: 10         # 反馈发布频率
+
+    # ==============================================================
+    #  ZLAC8015D 驱动轮配置 (CANopen, 与 DM4310 共用 CAN 总线)
+    # ==============================================================
+    # 出厂默认: CAN Node ID = 1, RS485 Node ID = 4 (注意区分!)
+    # 修改 Node ID: 通过 RS485 写 Modbus 寄存器 0x200A, 写后存 EEPROM (0x2010=1), 断电重启
+    # DIP 开关 SW3/SW4 都 OFF = 自定义模式 (由软件设置)
+
+    zlac_enabled: true         # 是否启用 ZLAC 驱动轮
+    zlac_node_id: 1            # CANopen Node ID (出厂 CAN 默认=1)
+    zlac_max_rpm: 400          # RPM 限幅 (翻倍)
+    zlac_profile_accel: 500    # 加速度 (RPM/s)
+    zlac_profile_decel: 500    # 减速度 (RPM/s)
+    zlac_gear_ratio: 1.0       # 减速比 (轮毂电机通常 1.0)
+    zlac_direction: [1, -1, 1, -1]   # 安装方向修正
+    zlac_wheel_index: 0        # swerve_cmd[4+index] 对应当前 ZLAC 轮子
