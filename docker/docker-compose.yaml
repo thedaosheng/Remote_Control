@@ -1,0 +1,62 @@
+# ==============================================================
+#  Teleop 舵轮底盘 Docker Compose
+# ==============================================================
+#
+# NUC 部署: docker compose up driver
+# 开发调试: docker compose up (全部启动)
+#
+# USB 设备会自动透传到容器内
+
+services:
+  # ---- 电机驱动节点 (NUC 部署核心) ----
+  driver:
+    image: teleop-swerve:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: driver
+    restart: unless-stopped
+    # USB 设备透传 (达妙 USB-CAN + 未来其他设备)
+    privileged: true
+    volumes:
+      - /dev:/dev
+      # 可选: 挂载自定义配置覆盖默认值
+      # - ./config/swerve_dm_motor.yaml:/ros2_ws/config/swerve_dm_motor.yaml
+    environment:
+      # 自定义配置文件路径 (如果挂载了外部配置)
+      # - CONFIG_FILE=/ros2_ws/config/swerve_dm_motor.yaml
+      - ROS_DOMAIN_ID=0
+    network_mode: host  # 允许 ROS2 DDS 跨容器通信
+
+  # ---- MuJoCo 仿真 (开发调试用，NUC 可选) ----
+  sim:
+    image: teleop-swerve:latest
+    command: sim
+    environment:
+      - MUJOCO_GL=egl
+      - DISPLAY=${DISPLAY:-:0}
+      - ROS_DOMAIN_ID=0
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev:/dev
+    privileged: true
+    network_mode: host
+    depends_on:
+      - driver
+    profiles:
+      - dev  # 只在 --profile dev 时启动
+
+  # ---- 键盘控制 (本地调试用) ----
+  keyboard:
+    image: teleop-swerve:latest
+    command: keyboard
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - ROS_DOMAIN_ID=0
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    network_mode: host
+    depends_on:
+      - driver
+    profiles:
+      - dev

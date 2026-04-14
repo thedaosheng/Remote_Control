@@ -1,0 +1,19 @@
+# 不打包进镜像的文件
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+__pycache__/
+*.pyc
+.git/
+SenseGlove*/
+senseglove_official/
+mujoco_menagerie/
+tsdf_collision/
+scripts/
+lib/
+TouchUsage/
+*.o
+*.a
+*.elf
+*.bin
+.pio/
