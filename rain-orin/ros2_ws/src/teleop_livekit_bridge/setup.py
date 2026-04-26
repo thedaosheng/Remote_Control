@@ -29,7 +29,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'livekit_bridge_node = teleop_livekit_bridge.livekit_bridge_node:main'
+            'livekit_bridge_node = teleop_livekit_bridge.livekit_bridge_node:main',
+            'lk_data_bridge = teleop_livekit_bridge.lk_data_bridge_node:main'
         ],
     },
 )

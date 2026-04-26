@@ -1,0 +1,23 @@
+[Unit]
+Description=ZED Mini hardware H.264 encoder (GStreamer nvv4l2h264enc -> TCP 5004)
+Documentation=file:///home/bit/Telep/rain-orin/gst_hw_tcp.sh
+After=network-online.target
+
+[Service]
+Type=simple
+# ROS 2 RMW 统一 (本服务不直接发 ROS, 但保留为 rain-orin 全局 env)
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=CYCLONEDDS_URI=file:///home/bit/cyclonedds.xml
+Environment=ROS_DOMAIN_ID=0
+# 路径已随 PR-1 重命名: device-a-linux/ -> Telep/rain-orin/
+ExecStart=/bin/bash /home/bit/Telep/rain-orin/gst_hw_tcp.sh
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+# 低延迟实时任务
+Nice=-5
+# 与 lk CLI 有依赖, 先启动, 由 tcpserversink 等待 client
+
+[Install]
+WantedBy=default.target

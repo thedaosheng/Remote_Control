@@ -20,6 +20,12 @@ After=network-online.target
 
 [Service]
 Type=simple
+# 凭证从 /etc/livekit.env 读 (LIVEKIT_API_KEY / LIVEKIT_API_SECRET); 不进 git.
+EnvironmentFile=/etc/livekit.env
+# ROS 2 RMW 统一 (本服务不直接跑 ROS, 但保留为 rain-orin 全局 env, 防止 fall-through 到默认 Fast DDS)
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=CYCLONEDDS_URI=file:///home/bit/cyclonedds.xml
+Environment=ROS_DOMAIN_ID=0
 ExecStart=/usr/bin/python3 -u __SCRIPT_DIR__/zedmini_livekit_sender.py
 Restart=on-failure
 RestartSec=5

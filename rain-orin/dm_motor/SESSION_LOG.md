@@ -93,7 +93,7 @@ B端 阿里云 LiveKit Server
   ssh root@39.102.113.104
   /etc/livekit.yaml
   端口 7880 (WebSocket) / 7881 (RTC TCP) / 50000-60000 UDP
-  房间: teleop-room  Key: teleop_key  Secret: teleop_secret_key_2026
+  房间: teleop-room  Key/Secret: 见 ../.env.example + ../SECURITY.md (历史值已 redact)
   ↓
 C端 Apple Vision Pro + Mac
   ssh Zhuanz@192.168.0.212

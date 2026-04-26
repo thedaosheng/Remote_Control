@@ -20,14 +20,21 @@ from livekit import api
 import datetime
 import json
 import base64
+import os
 
 # ============================================================
 # LiveKit Server 配置
+# 凭证仅从 env 读取, 不再带默认值 (旧默认值已被公开,见 SECURITY.md)
 # ============================================================
-LIVEKIT_API_KEY = "teleop_key"
-LIVEKIT_API_SECRET = "teleop_secret_key_2026"
+LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY")
+LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET")
+if not (LIVEKIT_API_KEY and LIVEKIT_API_SECRET):
+    raise RuntimeError(
+        "LIVEKIT_API_KEY and LIVEKIT_API_SECRET env vars required "
+        "(see ../.env.example and ../SECURITY.md)"
+    )
 LIVEKIT_ROOM = "teleop-room"
-LIVEKIT_URL = "ws://39.102.113.104:7880"
+LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "ws://39.102.113.104:7880")
 
 # Token 有效期（天）
 TOKEN_TTL_DAYS = 30

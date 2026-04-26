@@ -1,0 +1,21 @@
+[Unit]
+Description=Teleop safety services (14 std_srvs/Trigger for AIRBOT left/right + bus-wide e-stop)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/bit
+# ROS 2 RMW 统一: 跨 Orin/CangJie 用 Cyclone DDS, 接口锁 eno1 (Rain LAN)
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=CYCLONEDDS_URI=file:///home/bit/cyclonedds.xml
+Environment=ROS_DOMAIN_ID=0
+# 直接跑顶层 teleop_safety_node.py (该脚本以 ROS 2 rclpy + std_srvs/Trigger 形式提供 14 个服务)
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && exec /usr/bin/python3 -u /home/bit/Telep/rain-orin/20260424-cc-teleop_safety_node.py'
+StandardOutput=append:/tmp/teleop-safety.log
+StandardError=append:/tmp/teleop-safety.log
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

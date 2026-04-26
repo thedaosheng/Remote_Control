@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Cyclone DDS config for AGX Orin (rain-orin).
+
+  Pins multicast/discovery to eno1 (Rain LAN 192.168.8.0/24, primary).
+  Without pinning, on dual-homed hosts (eno1 + WiFi) Cyclone picks the
+  first UP iface in metric order and silently fails cross-machine
+  multicast to CangJie.
+
+  Install:
+    cp rain-orin/setup/cyclonedds-eno1.xml ~/cyclonedds.xml
+
+  Then in ~/.bashrc:
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    export CYCLONEDDS_URI=file:///home/bit/cyclonedds.xml
+    export ROS_DOMAIN_ID=0
+
+  All systemd user units in rain-orin/systemd/ already set the same
+  three env vars in their [Service] sections, so they don't depend on
+  the user's interactive shell env.
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain Id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="eno1"/>
+      </Interfaces>
+      <AllowMulticast>default</AllowMulticast>
+    </General>
+  </Domain>
+</CycloneDDS>
