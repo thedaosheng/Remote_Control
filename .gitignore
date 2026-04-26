@@ -24,6 +24,9 @@ scripts/MUJOCO_LOG.TXT
 # Claude Code 本地配置
 .claude/
 
+# Env vars (see .env.example for template)
+.env
+
 # 独立 git 仓库（已在 device-a-linux/ 中）
 DM_Control_Python/
 
