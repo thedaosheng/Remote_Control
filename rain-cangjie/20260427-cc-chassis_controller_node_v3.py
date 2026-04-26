@@ -167,7 +167,9 @@ def dm3519_lift_frame(lift_current_a, m2_a=0.0, m3_a=0.0, m4_a=0.0):
     返回: (data: bytes 8B, m1_int16: int) — int16 用于日志显示
     """
     def to_int16(a):
-        v = int(round(a * 16384.0 / 20.0))
+        # Truncation (int(...) not round(...)) matches scripts/20260420-cc-pi_3519_test.py
+        # reference verbatim — keeps mock log byte-identical to the proven-good test code.
+        v = int(a * 16384.0 / 20.0)
         v = max(-32768, min(32767, v))
         return v
 
