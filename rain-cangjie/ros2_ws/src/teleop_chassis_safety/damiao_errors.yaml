@@ -1,0 +1,321 @@
+# DaMiao 电机故障诊断配置 - 仓颉 / Faber chassis & head safety module
+# =============================================================================
+# 数据来源 (全部 verified):
+#   [A] DM-S3519-1EC 减速电机(含 DM3520-1EC 驱动器) 使用说明书 V1.1 - 第 6-7 页反馈帧定义 - 最权威, 状态/错误码最完整
+#       gitee.com/kit-miao/dm-s3519-1ec (本地副本: /tmp/20260424-cc-dm3519_manual.pdf → /tmp/20260424-cc-dm3519_manual.txt line 235-262)
+#   [B] DM-J4310-2EC V1.1 减速电机 使用说明书 V1.0 2023.11.16 - 第 6 页反馈帧 + 第 4 页指示灯状态
+#       damiao.enactic.ai/assets/files/dm-j4310-2ec-v1.1-zh-5d089e0b013d8e2fc203c5b670008a66.pdf (本地副本: /tmp/20260424-cc-dm-j4310-official.txt line 194-224)
+#   [C] 达妙官方 Python SDK - DM_CAN.py `__process_packet()` 函数 (181 上 ~/teleop/DM_Control_Python/DM_CAN.py)
+#       本地副本: /tmp/20260424-cc-DM_CAN.py line 260-288 - 反馈帧解析逻辑
+#   [D] cmjang/DM_Motor_Control damiao.h - C++ 社区实现, 与 SDK/manual 一致
+#       本地副本: /tmp/20260424-cc-damiao_h.h line 107-122 (CMD=0xEE 通信错误帧) + line 512-576 (正常反馈解析)
+#   [E] DaMiao 2026 选型表 (181: ~/teleop/docs/20260417-cc-damiao_2026_selection_table.pdf/.txt)
+#       本地副本: /tmp/20260424-cc-damiao_table.txt - 每型号 PMAX/VMAX/TMAX/减速比
+
+# ============================================================================
+# 关键决定 (2026-04-24):
+# ============================================================================
+# 1. 最初任务书里猜 "state 在高 4 bit, err 在低 4 bit" - 错的.
+#    两份官方手册 [A][B] 都明确: D[0] = ID(低4位) | ERR(高4位).
+#    ERR 其实是一个合并的 "状态+错误码", 4 bit 容纳 12 个值 (0/1 是正常运行, 5/6/8-E 是错误).
+#    这在 DM3519 V1.1 手册 [A] 列得最齐全 - DM4310 V1.0 手册 [B] 只列了 8-E 没写 0/1/5/6.
+#    但两者都是 "D[0] = ID|ERR<<4" 同一 bit 布局. 所以我们用 DM3519 的完整 code 表, DM4310 兼容.
+# 2. 官方 SDK [C] 根本没做错误解析. 它只解码 POS/VEL/T 扔掉了 D[0] 的高 4 bit.
+#    这意味着生产代码必须自己做这个解析 - 我们本模块就是填这个空白.
+# 3. "offline_timeout_ms = 100" 按用户任务书给定. 底盘 200Hz MIT 控制 → 每 5ms 一帧反馈,
+#    100ms = 20 帧未到 = 真的掉线 (不是偶尔抖动).
+# 4. DM3519 底盘升降电机 - 经 Gitee kit-miao 镜像 [A] 确认它使用和 DM4310 完全相同的 MIT
+#    反馈帧协议 (D[0] 布局一致, ERR code 表相同且更全). 但 181 脚本 pi_dm3519_probe.py
+#    里试的是大疆 RoboMaster M3508 风格 ID (0x200/0x1FF/0x300/0x301) - 暗示用户现场的
+#    DM3519 可能是 "一拖四" 版 (外置 DM3520 驱动器) 而不是标准 CAN ID 挂在 1-0x7F 的主
+#    通讯地址. 待用户实测确认 CAN ID 落在哪个区间后, 协议仍然是达妙 MIT 反馈帧.
+
+# ============================================================================
+# DM4310 - 底盘 swerve 转向电机 (Rain 底盘 × 4: FL/FR/RL/RR)
+# ============================================================================
+dm4310:
+  product_line: "joint_module"
+  description: "达妙 DM-J4310-2EC V1.1 关节模组, 24V, 3/7 Nm rated/peak, 10:1 行星减速"
+  control_modes: ["MIT", "POS_VEL", "VEL", "POS_FORCE"]
+
+  # 映射参数 (达妙 SDK Limit_Param[0]): Q_MAX / DQ_MAX / TAU_MAX
+  # 24V 版. 48V 版用 DM4310_48V 配置 DQ_MAX=50.
+  limits:
+    pmax_rad: 12.5       # 位置映射范围 ±rad (16-bit)
+    vmax_rad_s: 30.0     # 速度映射范围 ±rad/s (12-bit)
+    tmax_nm: 10.0        # 扭矩映射范围 ±Nm (12-bit)
+
+  # MIT 模式反馈帧 (8 字节, 所有控制模式下格式相同 - 见 [A] line 231) [verified: A, B]
+  mit_reply_frame:
+    total_bytes: 8
+    notes: "CAN ID = MasterID (调试助手配置, 默认 0x00 触发广播回复). D[0] 低 4 位为 CAN_ID 的低 4 位即 SlaveID, D[0] 高 4 位为状态/错误码."
+    layout:
+      byte_0:
+        bits_0_3: "slave_id_low4"      # CAN_ID 的低 4 位 (ID)
+        bits_4_7: "state_error_code"   # 合并的状态 + 错误码 (ERR) - 见 state_error_codes
+      byte_1: "pos[15:8]"              # 位置高 8 位
+      byte_2: "pos[7:0]"               # 位置低 8 位 (16-bit 总位置)
+      byte_3: "vel[11:4]"              # 速度高 8 位
+      byte_4:
+        bits_4_7: "vel[3:0]"           # 速度低 4 位
+        bits_0_3: "torque[11:8]"       # 扭矩高 4 位
+      byte_5: "torque[7:0]"            # 扭矩低 8 位 (12-bit 总扭矩)
+      byte_6: "t_mos_c"                # MOS 平均温度 (°C, uint8)
+      byte_7: "t_rotor_c"              # 线圈平均温度 (°C, uint8)
+    pos_bits: 16
+    vel_bits: 12
+    torque_bits: 12
+    # 数值解码: value = (raw / (2^bits - 1)) * (x_max - x_min) + x_min  (其中 x_min = -x_max)
+    # 参见 DM_CAN.py uint_to_float() line 494-498 [verified: C]
+
+  # 状态/错误码完整表 - 来源: DM3519 V1.1 手册 [A] line 252-262 (最齐全版本)
+  # DM4310 V1.0 手册 [B] 仅列 8-E, 0/1/5/6 等未列明但 4-bit 编码空间相同. 合理推断底层固件
+  # 统一使用这一套编码. DM4310 未列出的代码在实际设备上是否出现取决于固件版本.
+  state_error_codes:
+    0x0:
+      zh: "失能"
+      en: "disabled"
+      role: "normal"
+      severity: "none"
+      recoverable: true
+      verified: true
+      source: "[A] DM3519 V1.1 manual line 252 - 确认; [B] DM4310 V1.0 manual 未明列但指示灯说明第 4 页 '红灯常亮 = 失能模式' 一致"
+    0x1:
+      zh: "使能"
+      en: "enabled"
+      role: "normal"
+      severity: "none"
+      recoverable: true
+      verified: true
+      source: "[A] line 253 - 确认; [B] 第 4 页 '绿灯常亮 = 使能模式, 正常工作状态'"
+    0x5:
+      zh: "传感器读出错误"
+      en: "sensor_read_error"
+      role: "fault"
+      severity: "hard"
+      recoverable: false
+      verified: true
+      verified_on_dm4310: false
+      source: "[A] line 254; [B] 未列, DM4310 固件实际是否出现此码待实测"
+    0x6:
+      zh: "电机参数读取错误"
+      en: "param_read_error"
+      role: "fault"
+      severity: "hard"
+      recoverable: false
+      verified: true
+      verified_on_dm4310: false
+      source: "[A] line 255; [B] 未列, DM4310 固件实际是否出现此码待实测"
+    0x8:
+      zh: "过压保护"
+      en: "over_voltage"
+      role: "fault"
+      severity: "hard"
+      recoverable: false
+      verified: true
+      source: "[A] line 256, [B] line 204"
+      action: "检查 24V 电源, 建议电压 <=32V (DM4310) / <=60V (DM3519)"
+    0x9:
+      zh: "欠压保护"
+      en: "under_voltage"
+      role: "fault"
+      severity: "hard"
+      recoverable: false
+      verified: true
+      source: "[A] line 257, [B] line 205"
+      action: "检查电源电压, DM4310 建议 >=15V, DM3519 建议 >=15V"
+    0xA:
+      zh: "过电流保护"
+      en: "over_current"
+      role: "fault"
+      severity: "hard"
+      recoverable: false
+      verified: true
+      source: "[A] line 258, [B] line 206"
+      action: "负载过大或短路, DM4310 峰值相电流 7.2A, DM3519 20.5A"
+    0xB:
+      zh: "MOS 过温保护"
+      en: "mos_over_temp"
+      role: "fault"
+      severity: "hard"
+      recoverable: true
+      cool_down_recovery: true
+      verified: true
+      source: "[A] line 259, [B] line 207"
+      action: "停机等待 MOS 降温 (保护阈值 120°C), 检查散热条件"
+    0xC:
+      zh: "电机线圈过温保护"
+      en: "coil_over_temp"
+      role: "fault"
+      severity: "hard"
+      recoverable: true
+      cool_down_recovery: true
+      verified: true
+      source: "[A] line 260, [B] line 214"
+      action: "停机等待线圈降温 (保护阈值按用户配置 OT_Value 寄存器, 建议 <=100°C)"
+    0xD:
+      zh: "通讯丢失"
+      en: "comm_lost"
+      role: "fault"
+      severity: "soft"
+      recoverable: true
+      verified: true
+      source: "[A] line 261, [B] line 215"
+      action: "超过 TIMEOUT 寄存器设定周期未收到 CAN 指令, 电机自动退出使能. 上层控制器需重新使能."
+    0xE:
+      zh: "过载保护"
+      en: "overload"
+      role: "fault"
+      severity: "hard"
+      recoverable: false
+      verified: true
+      source: "[A] line 262, [B] line 216"
+      action: "长时间大扭矩输出触发 I²t 保护, 检查机械堵转或负载"
+
+  # ==========================================================================
+  # 命令帧 - 8 字节特殊控制帧, CAN ID = SlaveID (电机 CAN ID)
+  # 来源: DM_CAN.py __control_cmd() line 327-329 [verified: C]
+  # ==========================================================================
+  command_frames:
+    enable:
+      data_hex: "FF FF FF FF FF FF FF FC"
+      notes: "使能电机. 建议上电 >=2s 后再使能. 发完后 sleep 100ms 再读反馈."
+      verified: true
+      source: "[C] DM_CAN.py line 206 `self.__control_cmd(Motor, np.uint8(0xFC))`"
+    disable:
+      data_hex: "FF FF FF FF FF FF FF FD"
+      notes: "失能电机. 失能后 MIT 指令会被忽略, 电机无扭矩输出."
+      verified: true
+      source: "[C] DM_CAN.py line 228 `self.__control_cmd(Motor, np.uint8(0xFD))`"
+    set_zero_position:
+      data_hex: "FF FF FF FF FF FF FF FE"
+      notes: "设置当前位置为 0 点. 必须先失能."
+      verified: true
+      source: "[C] DM_CAN.py line 237 `self.__control_cmd(Motor, np.uint8(0xFE))`"
+    clear_error:
+      data_hex: "FF FF FF FF FF FF FF FB"
+      notes: "清除故障状态码. 官方 SDK 未暴露此 API (DM_CAN.py 没有对应方法), 但社区与达妙驱动控制协议 V1.4 都记录了 0xFB 清错码. 使用时: disable → 发此帧 → enable 重新使能."
+      verified: false
+      verified_note: "任务书作为 priori 给出, 未在 DM_CAN.py 里 cross-check. 社区项目用过但个别固件版本差异. 生产部署前应用调试助手验证此命令确实清 ERR."
+      source: "任务书 (用户先验) + DaMiao 调试助手协议 V1.4 社区引用"
+    refresh_status:
+      data_hex: "(非统一 FF 帧) CAN ID=0x7FF, D[0]=id_low D[1]=id_high D[2]=0xCC ..."
+      notes: "主动请求电机状态 (不依赖周期反馈). 格式不同于其他命令, 见 [C] line 408-416"
+      verified: true
+      source: "[C] DM_CAN.py refresh_motor_status() line 408-416"
+
+  # ==========================================================================
+  # 掉线/看门狗参数
+  # ==========================================================================
+  offline_timeout_ms: 100       # 用户任务书规定. 500Hz 反馈下 = 50 帧连续丢失阈值
+  expected_reply_rate_hz: 500   # 用户任务书 (实测 pi_kinematics_demo.py steer @ 200Hz)
+  fault_recovery_sequence:
+    - "disable (发 FF...FD)"
+    - "wait 100ms"
+    - "send clear_error (发 FF...FB) - 可选, 非官方 SDK API"
+    - "wait 100ms"
+    - "enable (发 FF...FC)"
+    - "wait 100ms"
+    - "verify ERR nibble == 0x1 (enabled)"
+
+  # ==========================================================================
+  # 仓颉 / Faber Rain 底盘实际部署 CAN ID (来自 pi_kinematics_demo.py STEER_CONFIG)
+  # ==========================================================================
+  rain_chassis_motor_map:
+    # {wheel_position: {slave_id: CAN_ID for control, master_id: CAN_ID in reply D[0] low 4 bits}}
+    FL: { slave_id: 0x06, master_id: 0x16 }
+    FR: { slave_id: 0x04, master_id: 0x14 }
+    RL: { slave_id: 0x05, master_id: 0x15 }
+    RR: { slave_id: 0x03, master_id: 0x13 }
+    source: "pi_kinematics_demo.py line 41-46 (181 /home/rhz/teleop/scripts/20260420-cc-pi_kinematics_demo.py)"
+    serial_device: "/dev/ttyACM1"
+    baud: 921600
+    can_bitrate: "1Mbps CAN classic"
+    usb2can_adapter: "达妙 USB2CAN 专有协议, NOT SocketCAN"
+
+# ============================================================================
+# DM3519 - 底盘升降电机 (Rain 底盘 × 1 lift)
+# ============================================================================
+dm3519:
+  product_line: "discrete_motor"
+  description: "达妙 DM-S3519-1EC 分立减速电机 (含 DM3520-1EC 外置驱动器), 24V, 3.5/7.8 Nm rated/peak, 19.203:1 减速"
+  control_modes: ["MIT", "POS_VEL", "VEL", "POS_FORCE"]
+
+  # 选型表 [E] line 76: DM-S3519-1EC PMAX=12.5 rad, VMAX=200 rad/s, TMAX=10 Nm
+  limits:
+    pmax_rad: 12.5
+    vmax_rad_s: 200.0
+    tmax_nm: 10.0
+
+  # ⚠️ DM_CAN.py 的 Limit_Param 数组 [C] line 71-75 没有 DM3519 / DM-S3519 条目 (Motor_Type 枚举
+  # line 557-569 也没有). 这意味着要控制 DM3519, 需要以下任一方式:
+  #   (a) 传入 motor_type=DM4310 并通过 change_limit_param() 改 PMAX/VMAX/TMAX 为上述 12.5/200/10
+  #   (b) 修改 DM_CAN.py 添加 DMS3519 枚举 (推荐)
+  # 本模块解码器按 DM3519 自己的 limits 做映射, 与 motor_type 枚举无关.
+
+  # MIT 反馈帧 - 与 DM4310 完全相同布局 (参见 [A] line 238-240 "各种模式下的反馈帧格式和数据是相同的")
+  mit_reply_frame:
+    total_bytes: 8
+    notes: "与 DM4310 相同布局 [A][B]. DM3519 属于分立电机系列 (外置 DM3520-1EC 驱动器), 但协议与关节模组系列共用."
+    layout:
+      byte_0:
+        bits_0_3: "slave_id_low4"
+        bits_4_7: "state_error_code"
+      byte_1: "pos[15:8]"
+      byte_2: "pos[7:0]"
+      byte_3: "vel[11:4]"
+      byte_4:
+        bits_4_7: "vel[3:0]"
+        bits_0_3: "torque[11:8]"
+      byte_5: "torque[7:0]"
+      byte_6: "t_mos_c"
+      byte_7: "t_rotor_c"
+    pos_bits: 16
+    vel_bits: 12
+    torque_bits: 12
+
+  # 状态/错误码 - 完全继承 DM3519 V1.1 手册 [A] (它就是 DM3519 的权威来源)
+  state_error_codes:
+    0x0: { zh: "失能", en: "disabled", role: "normal", severity: "none", recoverable: true, verified: true, source: "[A] line 252" }
+    0x1: { zh: "使能", en: "enabled", role: "normal", severity: "none", recoverable: true, verified: true, source: "[A] line 253" }
+    0x5: { zh: "传感器读出错误", en: "sensor_read_error", role: "fault", severity: "hard", recoverable: false, verified: true, source: "[A] line 254" }
+    0x6: { zh: "电机参数读取错误", en: "param_read_error", role: "fault", severity: "hard", recoverable: false, verified: true, source: "[A] line 255" }
+    0x8: { zh: "过压保护", en: "over_voltage", role: "fault", severity: "hard", recoverable: false, verified: true, source: "[A] line 256", action: "检查电源, DM3519 建议 <=60V" }
+    0x9: { zh: "欠压保护", en: "under_voltage", role: "fault", severity: "hard", recoverable: false, verified: true, source: "[A] line 257" }
+    0xA: { zh: "过电流保护", en: "over_current", role: "fault", severity: "hard", recoverable: false, verified: true, source: "[A] line 258", action: "DM3519 峰值相电流 20.5A" }
+    0xB: { zh: "MOS 过温保护", en: "mos_over_temp", role: "fault", severity: "hard", recoverable: true, cool_down_recovery: true, verified: true, source: "[A] line 259" }
+    0xC: { zh: "电机线圈过温保护", en: "coil_over_temp", role: "fault", severity: "hard", recoverable: true, cool_down_recovery: true, verified: true, source: "[A] line 260" }
+    0xD: { zh: "通讯丢失", en: "comm_lost", role: "fault", severity: "soft", recoverable: true, verified: true, source: "[A] line 261" }
+    0xE: { zh: "过载保护", en: "overload", role: "fault", severity: "hard", recoverable: false, verified: true, source: "[A] line 262" }
+
+  # 命令帧 - 沿用 DM4310 (SDK 对所有达妙电机使用统一 0xFC/FD/FE/FB 协议)
+  command_frames:
+    enable: { data_hex: "FF FF FF FF FF FF FF FC", notes: "使能. 同 DM4310.", verified: true, source: "[C] DM_CAN.py line 206, 协议共用" }
+    disable: { data_hex: "FF FF FF FF FF FF FF FD", verified: true, source: "[C] DM_CAN.py line 228" }
+    set_zero_position: { data_hex: "FF FF FF FF FF FF FF FE", verified: true, source: "[C] DM_CAN.py line 237" }
+    clear_error:
+      data_hex: "FF FF FF FF FF FF FF FB"
+      verified: false
+      source: "DaMiao 调试助手协议 V1.4 (社区)"
+      notes: "同 DM4310 注记 - SDK 未实现, 生产前用调试助手验证"
+
+  # 掉线参数 - 升降电机通常控制频率比转向低 (例如 50-100Hz 线性位置), 但仍沿用相同阈值
+  offline_timeout_ms: 100
+  expected_reply_rate_hz: 100
+
+  # ⚠️ 未知 / 待用户实测:
+  deployment_unknowns:
+    - "CAN ID 布局: 181 上 pi_dm3519_probe.py 用的是大疆 RoboMaster 风格 ID (0x200/0x1FF/0x300/0x301), 暗示可能配合 '一拖四' 分线器. 如果实际用 DM3520-1EC 独立驱动器, CAN ID 应该是标准 SlaveID/MasterID 形式."
+    - "DM3519 在 Faber Rain 底盘上用作升降. 电机物理安装方向决定了 pos_min/pos_max 的工作子集 - 诊断模块不负责, 调用者的 motion planner 处理."
+    - "如用户现场 DM3519 以 RoboMaster C620 风格协议接入 (0x200 广播 + 0x201-0x204 反馈), 那是 DJI 而非达妙 MIT, 本 YAML 的反馈帧解析不适用. 需确认实际固件."
+
+# ============================================================================
+# 通用配置
+# ============================================================================
+common:
+  usb2can_header_byte: 0xAA
+  usb2can_tail_byte: 0x55
+  usb2can_frame_length: 16          # 达妙 USB2CAN 每帧 16 字节, 8 字节 CAN 数据在 packet[7:15]
+  default_can_bitrate_bps: 1000000  # 1 Mbps CAN classic
+  default_serial_baud: 921600       # USB2CAN 串口波特率
+  zh_locale: "zh_CN"

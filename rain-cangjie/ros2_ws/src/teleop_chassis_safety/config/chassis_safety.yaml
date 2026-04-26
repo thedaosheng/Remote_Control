@@ -1,0 +1,51 @@
+# =================================================================
+#  chassis_safety_node 配置 — 仓颉/Faber 底盘 safety
+# =================================================================
+#
+# 阈值参考 YZL 2026-04-24 决定:
+#   200 ms → 警告 (可能只是网络抖动)
+#   500 ms → 软风车 (进入 3-retry clear+reenable)
+#   1000 ms → 硬风车 (需人工 reset_safety)
+#
+# 硬件映射来自 ~/teleop/scripts/20260420-cc-pi_kinematics_demo.py
+#   FL=0x06, FR=0x04, RL=0x05, RR=0x03 (TX CAN ID)
+#   RX = TX + 0x10
+#
+# 运行:
+#   ros2 run teleop_chassis_safety chassis_safety_node \
+#     --ros-args --params-file config/chassis_safety.yaml
+
+chassis_safety_node:
+  ros__parameters:
+    # ---- Cmd watchdog ----
+    cmd_topic: "/cmd_vel"
+    watchdog_warn_ms: 200
+    watchdog_soft_ms: 500
+    watchdog_hard_ms: 1000
+    watchdog_check_hz: 50.0
+
+    # ---- 软风车恢复 ----
+    max_soft_retries: 3
+    soft_retry_backoff_s: 0.5
+
+    # ---- ZLAC ----
+    zlac_node_ids: [2, 3]
+    zlac_can_channel: "can0"
+
+    # ---- DM4310 steer (name → CAN TX id, RX = TX + 0x10) ----
+    dm_steer_can_ids: [0x06, 0x04, 0x05, 0x03]  # FL, FR, RL, RR
+    dm_steer_names: ["FL", "FR", "RL", "RR"]
+
+    # ---- Motor fault polling ----
+    motor_poll_hz: 5.0
+
+    # ---- Health publishing ----
+    health_pub_hz: 1.0
+
+    # ---- 启动宽限 ----
+    startup_grace_s: 2.0
+
+    # ---- Ops backend (empty = disabled) ----
+    # 生产值示例: "ws://localhost:8080/ws/push" (本地) 或
+    #            "ws://39.102.113.104:8080/ws/push" (阿里云)
+    ops_backend_url: ""

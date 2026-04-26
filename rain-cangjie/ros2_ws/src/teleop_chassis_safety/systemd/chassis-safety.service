@@ -1,0 +1,33 @@
+[Unit]
+Description=仓颉/Faber 底盘 safety node (watchdog + 风车 state machine)
+Documentation=https://github.com/thedaosheng/agent-bus
+After=network.target
+# Adjust after which node brings up SocketCAN can0 (slcand or similar)
+Wants=can0-up.service
+
+[Service]
+Type=simple
+User=pi
+# Chassis Pi working directory (adjust for actual deploy target)
+WorkingDirectory=/home/pi/ros2_ws
+EnvironmentFile=-/etc/default/chassis-safety
+Environment=PYTHONUNBUFFERED=1
+Environment=ROS_DOMAIN_ID=0
+ExecStartPre=/bin/sleep 2
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source /home/pi/ros2_ws/install/setup.bash && exec ros2 run teleop_chassis_safety chassis_safety_node --ros-args --params-file /home/pi/ros2_ws/src/teleop_chassis_safety/config/chassis_safety.yaml'
+Restart=on-failure
+RestartSec=2
+# Resource guardrails — safety must stay responsive
+Nice=-5
+CPUWeight=200
+# Crash-only: if we segfault let systemd reap and restart
+KillMode=control-group
+TimeoutStopSec=5
+
+# Log to journal with priority info+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chassis-safety
+
+[Install]
+WantedBy=multi-user.target

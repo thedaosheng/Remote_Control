@@ -1,0 +1,542 @@
+# ============================================================
+# ZLAC8015D 故障代码结构化字典
+# ============================================================
+# Source tracking:
+#   - pdf_p14: /Users/edward/Claude/ZLAC8015D_help.pdf 3.5 STATUS INDICATOR LED 表 (11 行 fault)
+#   - guide_modbus: /Users/edward/Claude/ZLAC8015D_CAN_guide.md §7 "Fault Codes" 表 (0x0001..0x0400)
+#   - guide_regmap: /Users/edward/Claude/ZLAC8015D_CAN_guide.md §7 Modbus register 0x20A5/0x20A6
+#   - cia301: CANopen CiA301 standard object dictionary (公开标准)
+#   - cia402: CANopen CiA402 drives-and-motion-control profile (公开标准)
+#   - ref_driver: /home/rhz/teleop/ros2_ws/.../swerve_zlac_driver_node.py (181 上生产驱动)
+#
+# IMPORTANT caveats:
+#   (1) 厂家 PDF 未给出任何 CANopen object dictionary 条目。所有 0x2xxx 条目均是
+#       "Modbus register 地址直接映射为 CANopen index" 的合理猜测 (业界常见约定)。
+#       在用真实硬件 SDO 读一次 0x20A5:0 之前, 标记 verified=false。
+#   (2) PDF 原文 (3.5): "The fault can be cleared when the user powers off and restarts
+#       the power." —— 这强烈暗示 ZLAC 的 fault latching 行为偏向硬锁 (不靠
+#       0x6040=0x80 清除)。我把 "暂态类 (过压/欠压/过温)" 标为 soft+可恢复 (业界通常
+#       可靠 fault-reset 清除), "硬件类 (HALL/EEPROM/内部 ref)" 标为 hard+不可恢复。
+#       如果实机测试发现 fault-reset 不起作用, 把所有 recoverable 调回 false。
+#   (3) CiA301 0x603F / 0x1001 / 0x1003 / EMCY frame 等标准条目按 spec 描述, 但
+#       ZLAC 是否真实发 EMCY 帧、0x1003 是否有非零条目, 均需硬件侧验证。
+# ============================================================
+
+zlac8015d:
+
+  # ----------------------------------------------------------
+  # CiA402 标准 Error Code (0x603F 读回的 UINT16 值)
+  # ----------------------------------------------------------
+  # 源: CiA301/CiA402 标准 error code 分段
+  #   0x0000       — No error
+  #   0x1xxx       — Generic error (不常用)
+  #   0x2xxx       — Current
+  #   0x3xxx       — Voltage
+  #   0x4xxx       — Temperature
+  #   0x5xxx       — Device hardware
+  #   0x6xxx       — Device software
+  #   0x7xxx       — Additional modules
+  #   0x8xxx       — Monitoring / communication
+  #   0x9xxx       — External error
+  #   0xFxxx       — Manufacturer-specific
+  #
+  # ZLAC 并未公开声明使用哪些具体标准 code。这里列出最常见且可能出现在 0x603F
+  # 或 EMCY frame 里的 CiA402 标准 code, 并把每个 ZLAC LED 故障类别映射到
+  # 最接近的 CiA 标准 code 供诊断使用。若 0x603F 读回值不在此表, 用
+  # code_to_zh() 的 fallback "未知故障 (0xXXXX)"。
+  cia402_error_codes:
+
+    0x0000:
+      source: "cia301_standard"
+      zh: "无故障"
+      en: "No error"
+      severity: "none"
+      recoverable: true
+      latching: false
+      notes: "标准值: 0x603F 读回 0 表示无故障"
+      verified: true
+
+    0x2310:
+      source: "cia301_standard"
+      zh: "过流故障"
+      en: "Continuous over-current"
+      severity: "hard"
+      recoverable: false
+      latching: true
+      notes: "CiA402 标准 continuous over-current code。PDF §3.5 '3 Red' 过流保护 (相电流超过相间短路值) 典型对应。硬件层保护, 通常需 power-cycle。"
+      verified: false
+
+    0x2320:
+      source: "cia301_standard"
+      zh: "短路/接地故障"
+      en: "Short circuit / earth leakage"
+      severity: "hard"
+      recoverable: false
+      latching: true
+      notes: "CiA402 标准。ZLAC 是否上报此 code 未确认, 留作占位。"
+      verified: false
+
+    0x3110:
+      source: "cia301_standard"
+      zh: "母线过压"
+      en: "Mains over-voltage"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      notes: "对应 PDF §3.5 '1 Red' (电源电压超过最大额定值 ~60V)。业界多为 soft-clearable: 电压回落后 fault-reset 可清。"
+      verified: false
+
+    0x3120:
+      source: "cia301_standard"
+      zh: "母线欠压"
+      en: "Mains under-voltage"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      notes: "对应 PDF §3.5 '2 Red' (电源电压低于最低工作电压 ~16V)。"
+      verified: false
+
+    0x4210:
+      source: "cia301_standard"
+      zh: "驱动器过温"
+      en: "Excess temperature device"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      notes: "驱动本体过温 (非电机过温)。ZLAC PDF 未明确列出此项, 但标准 code 应该支持。"
+      verified: false
+
+    0x4310:
+      source: "cia301_standard"
+      zh: "电机过温"
+      en: "Motor temperature"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      notes: "对应 PDF §3.5 '11 Red' (电机温度过高)。J2/J6 Pin5/6 RTC+- 温度传感器上报。"
+      verified: false
+
+    0x5110:
+      source: "cia301_standard"
+      zh: "供电电压错误 (+24V)"
+      en: "Supply voltage fault (control)"
+      severity: "hard"
+      recoverable: false
+      latching: true
+      notes: "PDF §3.5 '8 Red' internal reference error 可能归入此类。"
+      verified: false
+
+    0x5210:
+      source: "cia301_standard"
+      zh: "控制电路硬件错误"
+      en: "Control hardware error"
+      severity: "hard"
+      recoverable: false
+      latching: true
+      notes: "可能覆盖 PDF §3.5 '8 Red' 内部参考错误、'9 Red' EEPROM 读错。"
+      verified: false
+
+    0x5530:
+      source: "cia301_standard"
+      zh: "EEPROM 故障"
+      en: "EEPROM fault"
+      severity: "hard"
+      recoverable: false
+      latching: true
+      notes: "对应 PDF §3.5 '9 Red' 参数读取错误 (EEPROM)。标准 code 5530。"
+      verified: false
+
+    0x7305:
+      source: "cia301_standard"
+      zh: "编码器/HALL 传感器故障"
+      en: "Incremental sensor / HALL fault"
+      severity: "hard"
+      recoverable: false
+      latching: true
+      notes: "对应 PDF §3.5 '10 Red' HALL 故障 (线未插或信号不对)。J2/J6 Pin 7/8/9 HALL U/V/W。"
+      verified: false
+
+    0x8311:
+      source: "cia301_standard"
+      zh: "持续超载"
+      en: "Excess torque / overload"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      notes: "对应 PDF §3.5 '4 Red' over-load (相电流超过设定过载电流)。"
+      verified: false
+
+    0x8611:
+      source: "cia301_standard"
+      zh: "位置跟随误差"
+      en: "Following error (position)"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      notes: "对应 PDF §3.5 '6 Red' position out-of-tolerance。"
+      verified: false
+
+    0x8612:
+      source: "cia301_standard"
+      zh: "速度跟随误差"
+      en: "Following error (velocity)"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      notes: "对应 PDF §3.5 '7 Red' speed out-of-tolerance。"
+      verified: false
+
+    0x8613:
+      source: "cia301_standard"
+      zh: "电流跟随误差"
+      en: "Following error (current)"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      notes: "对应 PDF §3.5 '5 Red' current out-of-tolerance (控制电流 vs 输出电流)。"
+      verified: false
+
+  # ----------------------------------------------------------
+  # Modbus 故障寄存器位图 (0x20A5=Left / 0x20A6=Right)
+  # ----------------------------------------------------------
+  # 这是 ZLAC 真正、验证过的 fault source (见 PDF §3.5 + CAN guide §7)。
+  # 在 CANopen 模式下这两个 index 很可能被直接映射为 CANopen object dict
+  # (ZLTECH 的常规做法), 但未经硬件 SDO 实测。
+  #
+  # 读取方法 (未验证 — 需硬件验证):
+  #   SDO read 0x20A5:0 → Left  motor fault bitmap (UINT16)
+  #   SDO read 0x20A6:0 → Right motor fault bitmap (UINT16)
+  # 注意位图语义: 单个寄存器可同时置多个 bit (如 0x0011 = 过压+过载)
+  # 所以诊断时要用 bitmask 拆分, 不能直接 value 对照表。
+  modbus_fault_codes:
+
+    0x0000:
+      zh: "无故障"
+      en: "No fault"
+      severity: "none"
+      recoverable: true
+      latching: false
+      led: null
+      notes: "bitmap=0 时无错"
+      verified: true
+
+    0x0001:
+      zh: "过压"
+      en: "Over-voltage"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      led: "1 Red"
+      notes: "PDF §3.5 '1 Red' — 电源电压超过最大额定值 (典型 ~60VDC 过压保护阈)。断电恢复正常后可通过 fault-reset 清除。"
+      verified: true
+
+    0x0002:
+      zh: "欠压"
+      en: "Under-voltage"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      led: "2 Red"
+      notes: "PDF §3.5 '2 Red' — 电源电压低于最低工作电压 (~16VDC)。"
+      verified: true
+
+    0x0004:
+      zh: "过流"
+      en: "Over-current"
+      severity: "hard"
+      recoverable: false
+      latching: true
+      led: "3 Red"
+      notes: "PDF §3.5 '3 Red' — 相电流超过相间短路值。硬件级保护, 可能伴随驱动器损坏。建议 power-cycle + 人工检查。"
+      verified: true
+
+    0x0008:
+      zh: "过载"
+      en: "Over-load"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      led: "4 Red"
+      notes: "PDF §3.5 '4 Red' — 相电流超过设定过载电流。负载减小后 fault-reset 可清。风车场景下极易触发 (电机持续堵转)。"
+      verified: true
+
+    0x0010:
+      zh: "电流超差"
+      en: "Current out-of-tolerance"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      led: "5 Red"
+      notes: "PDF §3.5 '5 Red' — 控制电流与输出电流超差。调参或物理系统变化可能触发。"
+      verified: true
+
+    0x0020:
+      zh: "位置超差"
+      en: "Position out-of-tolerance"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      led: "6 Red"
+      notes: "PDF §3.5 '6 Red' — 给定位置与输出位置超差。典型风车前兆 (电机跟不上指令)。"
+      verified: true
+
+    0x0040:
+      zh: "速度超差"
+      en: "Speed out-of-tolerance"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      led: "7 Red"
+      notes: "PDF §3.5 '7 Red' — 给定速度与输出速度超差。**风车核心指标** — chassis_safety_node 应优先监控。"
+      verified: true
+
+    0x0080:
+      zh: "内部基准错误"
+      en: "Internal reference error"
+      severity: "hard"
+      recoverable: false
+      latching: true
+      led: "8 Red"
+      notes: "PDF §3.5 '8 Red' — 驱动器内部故障。硬件问题, 需要返修或更换。"
+      verified: true
+
+    0x0100:
+      zh: "EEPROM 参数读错"
+      en: "EEPROM parameter read error"
+      severity: "hard"
+      recoverable: false
+      latching: true
+      led: "9 Red"
+      notes: "PDF §3.5 '9 Red' — EEPROM 参数读取错误。存储器坏或参数损坏, 需要重新写入出厂参数或返修。"
+      verified: true
+
+    0x0200:
+      zh: "HALL 故障"
+      en: "HALL fault"
+      severity: "hard"
+      recoverable: false
+      latching: true
+      led: "10 Red"
+      notes: "PDF §3.5 '10 Red' — HALL 线未插或信号不对。物理连接问题, 必须人工检查 J2/J6 Pin7/8/9 (HALL U/V/W)。"
+      verified: true
+
+    0x0400:
+      zh: "电机温度过高"
+      en: "High motor temperature"
+      severity: "soft"
+      recoverable: true
+      latching: false
+      led: "11 Red"
+      notes: "PDF §3.5 '11 Red' — 电机温度过高。自然冷却后 fault-reset 可清。长期高温会诱发 HALL/绕组损坏, 连续触发应当 hard-freeze。"
+      verified: true
+
+  # ----------------------------------------------------------
+  # Statusword (0x6041) 位定义 (CiA402 标准)
+  # ----------------------------------------------------------
+  # UINT16 位图, 各 bit 代表 CiA402 状态机当前状态。
+  statusword_bits:
+    0: { zh: "Ready to Switch On",   role: "ready_to_switch_on",   verified: true }
+    1: { zh: "Switched On",          role: "switched_on",          verified: true }
+    2: { zh: "Operation Enabled",    role: "operation_enabled",    verified: true }
+    3: { zh: "故障",                  role: "fault",                 verified: true }
+    4: { zh: "Voltage Enabled",      role: "voltage_enabled",      verified: true }
+    5: { zh: "快速停止激活",          role: "quick_stop_active",    verified: true }
+    6: { zh: "Switch On Disabled",   role: "switch_on_disabled",   verified: true }
+    7: { zh: "警告",                  role: "warning",               verified: true }
+    8: { zh: "厂家定义",              role: "manufacturer_specific", verified: false, notes: "CiA402 bit 8 manufacturer-specific, ZLAC 行为不明" }
+    9: { zh: "远程",                  role: "remote",                verified: true }
+    10: { zh: "目标到达",             role: "target_reached",        verified: true }
+    11: { zh: "内部限制激活",          role: "internal_limit_active", verified: true }
+    12: { zh: "模式相关 bit 1",       role: "operation_mode_specific_1", verified: true,  notes: "在 Profile Velocity 模式下: speed=0 标志" }
+    13: { zh: "模式相关 bit 2",       role: "operation_mode_specific_2", verified: true }
+    14: { zh: "厂家定义",              role: "manufacturer_specific", verified: false }
+    15: { zh: "厂家定义",              role: "manufacturer_specific", verified: false }
+
+  # Statusword 模式字识别
+  # 见 CiA402 Figure "State machine" — 这些是决定 "当前状态" 的 bit mask
+  statusword_state_masks:
+    not_ready_to_switch_on:    { mask: 0x4F, value: 0x00, zh: "未就绪" }
+    switch_on_disabled:        { mask: 0x4F, value: 0x40, zh: "Switch On Disabled" }
+    ready_to_switch_on:        { mask: 0x6F, value: 0x21, zh: "Ready to Switch On" }
+    switched_on:               { mask: 0x6F, value: 0x23, zh: "Switched On" }
+    operation_enabled:         { mask: 0x6F, value: 0x27, zh: "运行中 (Operation Enabled)" }
+    quick_stop_active:         { mask: 0x6F, value: 0x07, zh: "快速停止激活" }
+    fault_reaction_active:     { mask: 0x4F, value: 0x0F, zh: "故障响应中 (减速刹车)" }
+    fault:                     { mask: 0x4F, value: 0x08, zh: "故障状态" }
+
+  # ----------------------------------------------------------
+  # 标准 CiA301 error / communication objects
+  # ----------------------------------------------------------
+  standard_objects:
+
+    0x1001:
+      name: "Error Register"
+      type: "UINT8"
+      access: "RO"
+      zh: "错误寄存器"
+      source: "cia301"
+      verified: true
+      notes: |
+        CiA301 标准 8-bit error register (mandatory 对象)。
+        Bit  0: Generic error    (通用错)
+        Bit  1: Current          (电流类)
+        Bit  2: Voltage          (电压类)
+        Bit  3: Temperature      (温度类)
+        Bit  4: Communication    (通信类)
+        Bit  5: Device profile   (profile 特定)
+        Bit  6: Reserved
+        Bit  7: Manufacturer     (厂家特定)
+        EMCY 帧 byte 2 即此值。
+
+    0x1003:
+      name: "Predefined Error Field"
+      type: "UINT32 array"
+      access: "RO"
+      zh: "历史错误字段"
+      source: "cia301"
+      verified: true
+      notes: |
+        历史错误环形缓冲 (最近错误在 subindex=1)。
+        subindex 0: 当前缓存中错误数量 (UINT8)
+        subindex 1..N: 最近 N 条错误, 每条 UINT32, 低 16 bit = error code, 高 16 bit = manufacturer-specific
+        ZLAC 是否实现此对象未经硬件验证。
+
+    0x1014:
+      name: "COB-ID EMCY"
+      type: "UINT32"
+      access: "RW"
+      zh: "EMCY 帧 COB-ID"
+      source: "cia301"
+      verified: true
+      notes: "默认 0x80 + NodeID。bit 31 = 1 表示 EMCY 禁用。"
+
+    0x1017:
+      name: "Producer Heartbeat Time"
+      type: "UINT16"
+      access: "RW"
+      zh: "心跳周期 (ms)"
+      source: "cia301"
+      verified: true
+      notes: "设为 100ms 常见; ZLAC 默认值未知 (可能 0 = 禁用, 需硬件读)"
+
+    0x603F:
+      name: "Error Code"
+      type: "UINT16"
+      access: "RO"
+      zh: "故障代码"
+      source: "cia402"
+      verified: false
+      notes: |
+        CiA402 mandatory 对象。读回当前最新的 error code (见 cia402_error_codes 表)。
+        当 Statusword bit 3 = 1 (Fault 状态) 时, 此对象应有非零值。
+        ZLAC 是否实现未经硬件验证; 若未实现, SDO read 会返回 abort code 0x06020000
+        (Object does not exist)。
+
+    0x6040:
+      name: "Controlword"
+      type: "UINT16"
+      access: "RW"
+      zh: "控制字"
+      source: "cia402"
+      verified: true
+      notes: "故障复位: 写 0x80; 使能: 0x06 → 0x07 → 0x0F; 快速停止: 0x02"
+
+    0x6041:
+      name: "Statusword"
+      type: "UINT16"
+      access: "RO"
+      zh: "状态字"
+      source: "cia402"
+      verified: true
+      notes: "见 statusword_bits / statusword_state_masks"
+
+  # ----------------------------------------------------------
+  # EMCY 帧格式 (CiA301 标准)
+  # ----------------------------------------------------------
+  emcy_frame_format:
+    description: |
+      EMCY (Emergency) 帧 — CANopen slave 主动通知错误的专用帧。
+      COB-ID = 0x80 + NodeID, DLC = 8。
+      ZLAC 是否主动发 EMCY 帧需硬件验证 (通过 candump + 人为触发故障)。
+      若 ZLAC 不主动发 EMCY, chassis_safety_node 必须回退到定期轮询 0x603F / 0x6041 /
+      0x20A5 / 0x20A6。
+    cob_id_base: 0x80
+    dlc: 8
+    bytes:
+      - index: 0
+        name: "Error Code Low"
+        desc: "CiA402/301 标准 error code 低字节"
+      - index: 1
+        name: "Error Code High"
+        desc: "CiA402/301 标准 error code 高字节 (little-endian)"
+      - index: 2
+        name: "Error Register"
+        desc: "0x1001 error register 当前值 (UINT8)"
+      - index: 3
+        name: "Manufacturer Specific Byte 0"
+        desc: "厂家定义 (ZLAC 可能放 Modbus bitmap 低字节)"
+        verified: false
+      - index: 4
+        name: "Manufacturer Specific Byte 1"
+        desc: "厂家定义"
+        verified: false
+      - index: 5
+        name: "Manufacturer Specific Byte 2"
+        desc: "厂家定义"
+        verified: false
+      - index: 6
+        name: "Manufacturer Specific Byte 3"
+        desc: "厂家定义"
+        verified: false
+      - index: 7
+        name: "Manufacturer Specific Byte 4"
+        desc: "厂家定义"
+        verified: false
+    notes: |
+      厂家自定义 5 字节 (bytes 3-7) 的具体布局未知。
+      合理猜测 (需验证): byte 3-4 可能是 Modbus left/right fault bitmap;
+      byte 5 可能是 motor subindex (1=Left, 2=Right)。解析时先按 CiA301 标准
+      2+1 解, 剩余 5 字节保留原始 raw bytes 供后期 RE。
+
+  # ----------------------------------------------------------
+  # 心跳 / 丢线检测
+  # ----------------------------------------------------------
+  heartbeat:
+    cob_id_base: 0x700
+    default_period_ms: 100
+    recommended_timeout_ms: 500
+    justification: |
+      ZLAC 的 0x1017 Producer Heartbeat Time 默认值未知, 需要启动时 SDO write 设为
+      100ms (10 Hz 上报)。超时阈值 500ms = 5 次心跳缺失 → 足够过滤偶发 CAN jitter,
+      又能在 0.5s 内检测到真实断线 (人可察觉前)。
+      如果实测 ZLAC 默认 0x1017=0 (不主动发心跳), 必须在 chassis_safety_node
+      startup 序列里 SDO write 0x1017:0 = 100 (UINT16)。
+    consecutive_misses_threshold: 3
+    verified: false
+
+  driver_dropped_signals:
+    - name: "bus_off"
+      desc: "python-can bus.state == BusState.ERROR_PASSIVE or ERROR_BUSOFF"
+      trigger: "any"
+      severity: "hard"
+    - name: "heartbeat_missed_3x"
+      desc: "连续 3 次心跳周期未收到 0x700+NodeID"
+      trigger: "timeout"
+      severity: "hard"
+    - name: "sdo_timeout_500ms"
+      desc: "SDO read 无应答超过 500ms"
+      trigger: "timeout"
+      severity: "soft"
+      notes: "单次 SDO timeout 先标 soft (可能只是偶发), 连续 3 次升级为 hard"
+
+  # ----------------------------------------------------------
+  # 风车 (runaway) 检测建议阈值 (非故障码, 而是 chassis 层判据)
+  # ----------------------------------------------------------
+  runaway_heuristics:
+    velocity_tracking_error_rpm: 300
+    velocity_tracking_error_duration_ms: 200
+    description: |
+      风车早期信号: 实际速度 0x606C 与目标速度 0x60FF 持续偏差 > 300 RPM,
+      超过 200ms。此时还没触发 ZLAC 内部 "速度超差 0x0040" bitmap bit,
+      但足以让 chassis_safety 层提前软恢复。数值需在真机调试。
+    verified: false
