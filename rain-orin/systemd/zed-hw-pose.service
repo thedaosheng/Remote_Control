@@ -1,0 +1,24 @@
+[Unit]
+Description=Pose data channel receiver (LiveKit data -> UDP -> damo motor; legacy)
+# 注意: 已被 teleop-lk-data-bridge.service 替代 (后者直接 publish ROS 2 /vp/head_pose).
+# 保留作快速 fallback. 启用时需先 disable + stop teleop-lk-data-bridge.service (identity 冲突).
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=LIVEKIT_URL=ws://39.102.113.104:7880
+# 凭证从 /etc/livekit.env 读 (LIVEKIT_API_KEY / LIVEKIT_API_SECRET); 不进 git.
+EnvironmentFile=/etc/livekit.env
+# ROS 2 RMW 统一 (本服务不直接发 ROS, 但保留为 rain-orin 全局 env)
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=CYCLONEDDS_URI=file:///home/bit/cyclonedds.xml
+Environment=ROS_DOMAIN_ID=0
+# 路径已随 PR-1 重命名: device-a-linux/ -> rain-orin/
+ExecStart=/usr/bin/python3 -u /home/bit/Telep/rain-orin/20260422-cc-pose_data_receiver.py
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

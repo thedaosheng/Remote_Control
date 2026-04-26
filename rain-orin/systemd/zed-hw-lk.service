@@ -1,0 +1,30 @@
+[Unit]
+Description=lk CLI publisher (H.264 via TCP 5004 -> LiveKit room)
+After=zed-hw-gst.service network-online.target
+Requires=zed-hw-gst.service
+
+[Service]
+Type=simple
+# 凭证仅从 EnvironmentFile 读 (LIVEKIT_API_KEY / LIVEKIT_API_SECRET);
+# 文件 root-owned chmod 600, 不进 git. 模板见 ../.env.example / ../SECURITY.md.
+EnvironmentFile=/etc/livekit.env
+# ROS 2 RMW (lk CLI 本身不读, 但加上让 rain-orin 所有 unit 共享同一 env, 避免漂移)
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=CYCLONEDDS_URI=file:///home/bit/cyclonedds.xml
+Environment=ROS_DOMAIN_ID=0
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/local/bin/lk room join teleop-room \
+    --url ws://39.102.113.104:7880 \
+    --api-key ${LIVEKIT_API_KEY} \
+    --api-secret ${LIVEKIT_API_SECRET} \
+    --identity zed-mini-sender \
+    --publish h264://127.0.0.1:5004 \
+    --h26x-streaming-format annex-b \
+    --fps 100
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

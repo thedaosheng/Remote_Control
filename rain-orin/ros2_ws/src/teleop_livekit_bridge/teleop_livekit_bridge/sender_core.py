@@ -26,6 +26,7 @@ import asyncio
 import json
 import signal
 import sys
+import os
 import time
 import math
 import socket
@@ -47,9 +48,15 @@ from livekit import rtc, api
 # ==================== 配置常量 ====================
 
 # LiveKit 服务器配置
-LIVEKIT_URL = "ws://39.102.113.104:7880"       # LiveKit Server WebSocket 地址
-LIVEKIT_API_KEY = "teleop_key"                  # LiveKit API Key
-LIVEKIT_API_SECRET = "teleop_secret_key_2026"   # LiveKit API Secret
+# 凭证仅从 env 读取, 不再带默认值 (旧默认值已被公开,见 SECURITY.md)
+LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "ws://39.102.113.104:7880")
+LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY")
+LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET")
+if not (LIVEKIT_API_KEY and LIVEKIT_API_SECRET):
+    raise RuntimeError(
+        "LIVEKIT_API_KEY and LIVEKIT_API_SECRET env vars required "
+        "(see ../.env.example and ../SECURITY.md)"
+    )
 LIVEKIT_ROOM = "teleop-room"                    # 房间名称
 LIVEKIT_IDENTITY = "zed-mini-sender"            # 本机身份标识
 

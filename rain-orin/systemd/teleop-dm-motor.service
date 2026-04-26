@@ -1,0 +1,25 @@
+[Unit]
+Description=Teleop dm_motor ROS2 controller (subscribes /vp/head_pose -> 200Hz MIT on CAN)
+After=network-online.target teleop-lk-data-bridge.service
+# 可独立启动 (ROS2 topic 解耦), 不强制 requires bridge
+
+[Service]
+Type=simple
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/bit
+# 默认 mock_motor=true (今天没接达妙硬件); HDSC 插上后可改 false
+Environment=MOCK_MOTOR=true
+Environment=PRESET=L4
+# ROS 2 RMW 统一: 跨 Orin/CangJie 用 Cyclone DDS, 接口锁 eno1 (Rain LAN)
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=CYCLONEDDS_URI=file:///home/bit/cyclonedds.xml
+Environment=ROS_DOMAIN_ID=0
+# 路径已随 PR-1 重命名: device-a-linux/ -> rain-orin/
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && source /home/bit/Telep/rain-orin/ros2_ws/install/setup.bash && exec ros2 launch teleop_bringup motor_only.launch.py mock_motor:=${MOCK_MOTOR} preset:=${PRESET}'
+StandardOutput=append:/tmp/teleop-dm-motor.log
+StandardError=append:/tmp/teleop-dm-motor.log
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
