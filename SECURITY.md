@@ -6,7 +6,7 @@
 
 The Aliyun LiveKit room `teleop-room` API secret pair (`teleop_key` / `teleop_secret_key_2026`) is currently **publicly exposed** in the `main` branch git history (since at least 2026-04-06). It appears in:
 
-- `README.md` (line ~104, table)
+- ~~`README.md` (line 104, table)~~ — removed in this PR (PR-1)
 - `HANDOFF_PROMPT.md` (2 places)
 - `cloud/livekit.yaml` (active config)
 - `cloud/README.md`
@@ -39,7 +39,9 @@ The Aliyun LiveKit room `teleop-room` API secret pair (`teleop_key` / `teleop_se
 
 - SSH private keys (`~/.ssh/id_*`, `id_ed25519`, `id_rsa`)
 - Tailscale auth keys (`tskey-*`)
-- Sudo passwords. **Note**: `~/orin_setup.sh` and `~/orin_finish.sh` on the AGX Orin currently contain a plaintext sudo password — **must scrub before importing those files in PR-2** (replace with prompt or env-based credential handling).
+- Sudo passwords. **Notes**:
+  - `~/orin_setup.sh` and `~/orin_finish.sh` on the AGX Orin currently contain a plaintext sudo password — **must scrub before importing those files in PR-2** (replace with prompt or env-based credential handling).
+  - The ASUS host (`edward-asus`, operator GUI box) uses a different sudo password from Orin/CangJie. No setup script with plaintext password is currently committed, but **verify host filesystem and any local setup scripts before importing files in PR-4** (operator-asus).
 - Customer/client identifiable data (real grocery chain names, SKU lists, etc.)
 - TLS certs and keys (e.g. `/root/cert.pem`, `/root/key.pem` on Aliyun)
 - Third-party SDK debs/wheels with unconfirmed redistribution license:

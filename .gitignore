@@ -27,7 +27,7 @@ scripts/MUJOCO_LOG.TXT
 # Env vars (see .env.example for template)
 .env
 
-# 独立 git 仓库（已在 device-a-linux/ 中）
+# 独立 git 仓库（已在 rain-orin/dm_motor/ 下，按 basename 匹配）
 DM_Control_Python/
 
 # CAD 源文件压缩包
