@@ -204,7 +204,9 @@ class LiveKitWorker:
             # PR-4: 同帧紧跟一条 lift_cmd, 与 cmd_vel 一致频率;
             # schema 对齐 rain-orin/cloud_to_ros_bridge dispatcher
             # ({"type":"lift_cmd","speed":<float>}, speed ∈ [-1, +1]).
-            lift_payload = {'type': 'lift_cmd', 'speed': lift}
+            # Defense-in-depth clamp (bridge also clamps, but don't rely on it).
+            lift_clamped = max(-1.0, min(1.0, lift))
+            lift_payload = {'type': 'lift_cmd', 'speed': lift_clamped}
             lift_data = json.dumps(lift_payload).encode('utf-8')
             try:
                 await self.room.local_participant.publish_data(lift_data, reliable=True)
